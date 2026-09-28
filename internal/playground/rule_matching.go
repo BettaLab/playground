@@ -192,7 +192,7 @@ func tokenizeText(text string) []string {
 	// Split on Unicode separators, punctuation, and symbols
 	var tokens []string
 	var current strings.Builder
-	
+
 	for _, r := range text {
 		// Check if rune is a separator, punctuation, or symbol
 		if unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r) {
@@ -204,11 +204,11 @@ func tokenizeText(text string) []string {
 		}
 		current.WriteRune(r)
 	}
-	
+
 	if current.Len() > 0 {
 		tokens = append(tokens, strings.ToLower(current.String()))
 	}
-	
+
 	return tokens
 }
 
@@ -344,14 +344,14 @@ func (rm *RuleMatcher) matchCondition(tweet *Tweet, condition string, state *Sta
 func (rm *RuleMatcher) matchTokenizedKeyword(tweet *Tweet, keyword string) bool {
 	keyword = strings.ToLower(strings.TrimSpace(keyword))
 	tokens := tokenizeText(tweet.Text)
-	
+
 	// Check if any token matches the keyword
 	for _, token := range tokens {
 		if token == keyword {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -372,7 +372,7 @@ func (rm *RuleMatcher) matchEmoji(tweet *Tweet, emojiCondition string) bool {
 	if strings.HasPrefix(emoji, `"`) && strings.HasSuffix(emoji, `"`) {
 		emoji = strings.Trim(emoji, `"`)
 	}
-	
+
 	// Tokenize tweet text and check for emoji
 	tokens := tokenizeText(tweet.Text)
 	for _, token := range tokens {
@@ -381,7 +381,7 @@ func (rm *RuleMatcher) matchEmoji(tweet *Tweet, emojiCondition string) bool {
 			return true
 		}
 	}
-	
+
 	// Also check raw text for emoji
 	return strings.Contains(tweet.Text, emoji)
 }
@@ -394,30 +394,30 @@ func (rm *RuleMatcher) matchProximityOperator(tweet *Tweet, condition string) bo
 	if tildeIndex == -1 {
 		return false
 	}
-	
+
 	phrasePart := strings.TrimSpace(condition[:tildeIndex])
 	distancePart := strings.TrimSpace(condition[tildeIndex+1:])
-	
+
 	// Remove quotes if present
 	if strings.HasPrefix(phrasePart, `"`) && strings.HasSuffix(phrasePart, `"`) {
 		phrasePart = strings.Trim(phrasePart, `"`)
 	}
-	
+
 	// Parse distance N (must be <= 6)
 	distance, err := strconv.Atoi(distancePart)
 	if err != nil || distance < 1 || distance > 6 {
 		return false
 	}
-	
+
 	// Split phrase into keywords
 	keywords := strings.Fields(strings.ToLower(phrasePart))
 	if len(keywords) < 2 {
 		return false
 	}
-	
+
 	// Tokenize tweet text
 	tokens := tokenizeText(tweet.Text)
-	
+
 	// Find positions of keywords in tokens
 	keywordPositions := make(map[string][]int)
 	for i, token := range tokens {
@@ -427,12 +427,12 @@ func (rm *RuleMatcher) matchProximityOperator(tweet *Tweet, condition string) bo
 			}
 		}
 	}
-	
+
 	// Check if all keywords are found
 	if len(keywordPositions) < len(keywords) {
 		return false
 	}
-	
+
 	// Check if keywords are within N tokens of each other
 	// Try all combinations of positions
 	for _, pos1 := range keywordPositions[keywords[0]] {
@@ -447,7 +447,7 @@ func (rm *RuleMatcher) matchProximityOperator(tweet *Tweet, condition string) bo
 			}
 		}
 	}
-	
+
 	return false
 }
 
@@ -489,7 +489,7 @@ func (rm *RuleMatcher) matchHasOperator(tweet *Tweet, condition string) bool {
 // matchIsOperator matches is: operators
 func (rm *RuleMatcher) matchIsOperator(tweet *Tweet, condition string, state *State) bool {
 	condition = strings.ToLower(condition)
-	
+
 	switch condition {
 	case "is:retweet":
 		// Check if tweet is a retweet (has referenced_tweets with type "retweeted")
@@ -527,7 +527,7 @@ func (rm *RuleMatcher) matchIsOperator(tweet *Tweet, condition string, state *St
 		// Check if tweet source indicates nullcast
 		return strings.Contains(strings.ToLower(tweet.Source), "advertisers")
 	}
-	
+
 	return false
 }
 
@@ -582,20 +582,20 @@ func (rm *RuleMatcher) matchURLOperator(tweet *Tweet, condition string) bool {
 	urlPattern := strings.TrimPrefix(condition, "url:")
 	urlPattern = strings.TrimPrefix(urlPattern, "URL:")
 	urlPattern = strings.TrimSpace(urlPattern)
-	
+
 	// Remove quotes if present
 	if strings.HasPrefix(urlPattern, `"`) && strings.HasSuffix(urlPattern, `"`) {
 		urlPattern = strings.Trim(urlPattern, `"`)
 	}
-	
+
 	urlPattern = strings.ToLower(urlPattern)
-	
+
 	if tweet.Entities != nil && tweet.Entities.URLs != nil {
 		for _, urlEntity := range tweet.Entities.URLs {
 			// Tokenize both URL and expanded URL
 			urlTokens := tokenizeText(urlEntity.URL)
 			expandedTokens := tokenizeText(urlEntity.ExpandedURL)
-			
+
 			// Check if pattern tokens match URL tokens
 			patternTokens := tokenizeText(urlPattern)
 			for _, patternToken := range patternTokens {
@@ -612,7 +612,7 @@ func (rm *RuleMatcher) matchURLOperator(tweet *Tweet, condition string) bool {
 			}
 		}
 	}
-	
+
 	return false
 }
 
@@ -621,7 +621,7 @@ func (rm *RuleMatcher) matchRetweetsOfOperator(tweet *Tweet, condition string, s
 	username := strings.TrimPrefix(condition, "retweets_of:")
 	username = strings.TrimPrefix(username, "retweets_of_user:")
 	username = strings.TrimSpace(username)
-	
+
 	// Check if tweet is a retweet
 	if tweet.ReferencedTweets != nil {
 		for _, ref := range tweet.ReferencedTweets {
@@ -638,7 +638,7 @@ func (rm *RuleMatcher) matchRetweetsOfOperator(tweet *Tweet, condition string, s
 			}
 		}
 	}
-	
+
 	return false
 }
 
@@ -668,17 +668,17 @@ func (rm *RuleMatcher) matchBioOperator(tweet *Tweet, condition string, state *S
 	keyword := strings.TrimPrefix(condition, "bio:")
 	keyword = strings.TrimPrefix(keyword, "user_bio:")
 	keyword = strings.TrimSpace(keyword)
-	
+
 	// Remove quotes if present
 	if strings.HasPrefix(keyword, `"`) && strings.HasSuffix(keyword, `"`) {
 		keyword = strings.Trim(keyword, `"`)
 	}
-	
+
 	author := state.GetUserByID(tweet.AuthorID)
 	if author == nil {
 		return false
 	}
-	
+
 	// Tokenized match on user bio
 	bioTokens := tokenizeText(author.Description)
 	keywordLower := strings.ToLower(keyword)
@@ -687,7 +687,7 @@ func (rm *RuleMatcher) matchBioOperator(tweet *Tweet, condition string, state *S
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -695,12 +695,12 @@ func (rm *RuleMatcher) matchBioOperator(tweet *Tweet, condition string, state *S
 func (rm *RuleMatcher) matchBioNameOperator(tweet *Tweet, condition string, state *State) bool {
 	keyword := strings.TrimPrefix(condition, "bio_name:")
 	keyword = strings.TrimSpace(keyword)
-	
+
 	author := state.GetUserByID(tweet.AuthorID)
 	if author == nil {
 		return false
 	}
-	
+
 	// Tokenized match on user name
 	nameTokens := tokenizeText(author.Name)
 	keywordLower := strings.ToLower(keyword)
@@ -709,7 +709,7 @@ func (rm *RuleMatcher) matchBioNameOperator(tweet *Tweet, condition string, stat
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -718,17 +718,17 @@ func (rm *RuleMatcher) matchBioLocationOperator(tweet *Tweet, condition string, 
 	keyword := strings.TrimPrefix(condition, "bio_location:")
 	keyword = strings.TrimPrefix(keyword, "user_bio_location:")
 	keyword = strings.TrimSpace(keyword)
-	
+
 	// Remove quotes if present
 	if strings.HasPrefix(keyword, `"`) && strings.HasSuffix(keyword, `"`) {
 		keyword = strings.Trim(keyword, `"`)
 	}
-	
+
 	author := state.GetUserByID(tweet.AuthorID)
 	if author == nil {
 		return false
 	}
-	
+
 	// Tokenized match on user location
 	locationTokens := tokenizeText(author.Location)
 	keywordLower := strings.ToLower(keyword)
@@ -737,7 +737,7 @@ func (rm *RuleMatcher) matchBioLocationOperator(tweet *Tweet, condition string, 
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -773,12 +773,12 @@ func (rm *RuleMatcher) matchBoundingBoxOperator(tweet *Tweet, condition string) 
 func (rm *RuleMatcher) matchFollowersCountOperator(tweet *Tweet, condition string, state *State) bool {
 	rangeStr := strings.TrimPrefix(condition, "followers_count:")
 	rangeStr = strings.TrimSpace(rangeStr)
-	
+
 	author := state.GetUserByID(tweet.AuthorID)
 	if author == nil {
 		return false
 	}
-	
+
 	return matchRange(rangeStr, author.PublicMetrics.FollowersCount)
 }
 
@@ -787,12 +787,12 @@ func (rm *RuleMatcher) matchTweetsCountOperator(tweet *Tweet, condition string, 
 	rangeStr := strings.TrimPrefix(condition, "tweets_count:")
 	rangeStr = strings.TrimPrefix(rangeStr, "statuses_count:")
 	rangeStr = strings.TrimSpace(rangeStr)
-	
+
 	author := state.GetUserByID(tweet.AuthorID)
 	if author == nil {
 		return false
 	}
-	
+
 	return matchRange(rangeStr, author.PublicMetrics.TweetCount)
 }
 
@@ -801,12 +801,12 @@ func (rm *RuleMatcher) matchFollowingCountOperator(tweet *Tweet, condition strin
 	rangeStr := strings.TrimPrefix(condition, "following_count:")
 	rangeStr = strings.TrimPrefix(rangeStr, "friends_count:")
 	rangeStr = strings.TrimSpace(rangeStr)
-	
+
 	author := state.GetUserByID(tweet.AuthorID)
 	if author == nil {
 		return false
 	}
-	
+
 	return matchRange(rangeStr, author.PublicMetrics.FollowingCount)
 }
 
@@ -815,12 +815,12 @@ func (rm *RuleMatcher) matchListedCountOperator(tweet *Tweet, condition string, 
 	rangeStr := strings.TrimPrefix(condition, "listed_count:")
 	rangeStr = strings.TrimPrefix(rangeStr, "user_in_lists_count:")
 	rangeStr = strings.TrimSpace(rangeStr)
-	
+
 	author := state.GetUserByID(tweet.AuthorID)
 	if author == nil {
 		return false
 	}
-	
+
 	return matchRange(rangeStr, author.PublicMetrics.ListedCount)
 }
 
@@ -838,7 +838,7 @@ func matchRange(rangeStr string, value int) bool {
 		}
 		return value >= min && value <= max
 	}
-	
+
 	// Single number: >= that number
 	min, err := strconv.Atoi(strings.TrimSpace(rangeStr))
 	if err != nil {
@@ -852,12 +852,12 @@ func (rm *RuleMatcher) matchURLTitleOperator(tweet *Tweet, condition string) boo
 	keyword := strings.TrimPrefix(condition, "url_title:")
 	keyword = strings.TrimPrefix(keyword, "within_url_title:")
 	keyword = strings.TrimSpace(keyword)
-	
+
 	// Remove quotes if present
 	if strings.HasPrefix(keyword, `"`) && strings.HasSuffix(keyword, `"`) {
 		keyword = strings.Trim(keyword, `"`)
 	}
-	
+
 	// For now, return false as we don't track URL metadata
 	return false
 }
@@ -867,12 +867,12 @@ func (rm *RuleMatcher) matchURLDescriptionOperator(tweet *Tweet, condition strin
 	keyword := strings.TrimPrefix(condition, "url_description:")
 	keyword = strings.TrimPrefix(keyword, "within_url_description:")
 	keyword = strings.TrimSpace(keyword)
-	
+
 	// Remove quotes if present
 	if strings.HasPrefix(keyword, `"`) && strings.HasSuffix(keyword, `"`) {
 		keyword = strings.Trim(keyword, `"`)
 	}
-	
+
 	// For now, return false as we don't track URL metadata
 	return false
 }
@@ -881,14 +881,14 @@ func (rm *RuleMatcher) matchURLDescriptionOperator(tweet *Tweet, condition strin
 func (rm *RuleMatcher) matchURLContainsOperator(tweet *Tweet, condition string) bool {
 	phrase := strings.TrimPrefix(condition, "url_contains:")
 	phrase = strings.TrimSpace(phrase)
-	
+
 	// Remove quotes if present
 	if strings.HasPrefix(phrase, `"`) && strings.HasSuffix(phrase, `"`) {
 		phrase = strings.Trim(phrase, `"`)
 	}
-	
+
 	phraseLower := strings.ToLower(phrase)
-	
+
 	if tweet.Entities != nil && tweet.Entities.URLs != nil {
 		for _, urlEntity := range tweet.Entities.URLs {
 			if strings.Contains(strings.ToLower(urlEntity.URL), phraseLower) ||
@@ -897,7 +897,7 @@ func (rm *RuleMatcher) matchURLContainsOperator(tweet *Tweet, condition string) 
 			}
 		}
 	}
-	
+
 	return false
 }
 
@@ -905,12 +905,12 @@ func (rm *RuleMatcher) matchURLContainsOperator(tweet *Tweet, condition string) 
 func (rm *RuleMatcher) matchSourceOperator(tweet *Tweet, condition string) bool {
 	sourcePattern := strings.TrimPrefix(condition, "source:")
 	sourcePattern = strings.TrimSpace(sourcePattern)
-	
+
 	// Remove quotes if present
 	if strings.HasPrefix(sourcePattern, `"`) && strings.HasSuffix(sourcePattern, `"`) {
 		sourcePattern = strings.Trim(sourcePattern, `"`)
 	}
-	
+
 	return strings.Contains(strings.ToLower(tweet.Source), strings.ToLower(sourcePattern))
 }
 
@@ -927,7 +927,7 @@ func (rm *RuleMatcher) matchRetweetsOfTweetIDOperator(tweet *Tweet, condition st
 	tweetID := strings.TrimPrefix(condition, "retweets_of_tweet_id:")
 	tweetID = strings.TrimPrefix(tweetID, "retweets_of_status_id:")
 	tweetID = strings.TrimSpace(tweetID)
-	
+
 	// Check if tweet is a retweet of the specified tweet ID
 	if tweet.ReferencedTweets != nil {
 		for _, ref := range tweet.ReferencedTweets {
@@ -936,7 +936,7 @@ func (rm *RuleMatcher) matchRetweetsOfTweetIDOperator(tweet *Tweet, condition st
 			}
 		}
 	}
-	
+
 	return false
 }
 
@@ -993,16 +993,16 @@ func splitOnSpacesRespectingQuotes(s string) []string {
 	var parts []string
 	var current strings.Builder
 	inQuotes := false
-	
+
 	for i := 0; i < len(s); i++ {
 		char := s[i]
-		
+
 		if char == '"' {
 			inQuotes = !inQuotes
 			current.WriteByte(char)
 			continue
 		}
-		
+
 		if !inQuotes && char == ' ' {
 			if current.Len() > 0 {
 				parts = append(parts, current.String())
@@ -1010,60 +1010,50 @@ func splitOnSpacesRespectingQuotes(s string) []string {
 			}
 			continue
 		}
-		
+
 		current.WriteByte(char)
 	}
-	
+
 	if current.Len() > 0 {
 		parts = append(parts, current.String())
 	}
-	
+
 	return parts
 }
 
-// splitOnOperator splits a string on an operator, handling quoted strings
+// splitOnOperator splits a string on an operator while respecting quoted strings.
+// The operator may include surrounding spaces, e.g. " OR " or " AND ".
 func splitOnOperator(s, operator string) []string {
-	operatorUpper := strings.ToUpper(operator)
-	sUpper := strings.ToUpper(s)
-
 	var parts []string
 	var current strings.Builder
 	inQuotes := false
-	i := 0
 
-	for i < len(s) {
-		char := s[i]
+	operatorUpper := strings.ToUpper(operator)
+	sUpper := strings.ToUpper(s)
 
-		if char == '"' {
+	for i := 0; i < len(s); {
+		if s[i] == '"' {
 			inQuotes = !inQuotes
-			current.WriteByte(char)
+			current.WriteByte(s[i])
 			i++
 			continue
 		}
 
-		if !inQuotes && i+len(operator) <= len(s) {
-			substr := sUpper[i : i+len(operator)]
-			if substr == operatorUpper {
-				// Check if it's actually the operator (surrounded by spaces or at boundaries)
-				beforeOK := i == 0 || s[i-1] == ' '
-				afterOK := i+len(operator) >= len(s) || s[i+len(operator)] == ' '
+		if !inQuotes &&
+			i+len(operator) <= len(s) &&
+			sUpper[i:i+len(operator)] == operatorUpper {
 
-				if beforeOK && afterOK {
-					parts = append(parts, current.String())
-					current.Reset()
-					i += len(operator)
-					continue
-				}
-			}
+			parts = append(parts, current.String())
+			current.Reset()
+			i += len(operator)
+			continue
 		}
 
-		current.WriteByte(char)
+		current.WriteByte(s[i])
 		i++
 	}
 
-	if current.Len() > 0 {
-		parts = append(parts, current.String())
-	}
+	parts = append(parts, current.String())
 
 	return parts
 }

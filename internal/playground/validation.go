@@ -7,9 +7,12 @@
 package playground
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -20,38 +23,38 @@ import (
 
 // Input length limits matching X API constraints
 const (
-	MaxTweetLength       = 280  // X API tweet character limit
-	MaxUsernameLength    = 15   // X API username character limit (enforced by regex)
-	MaxDescriptionLength = 160  // X API user description character limit
-	MaxListNameLength    = 25   // X API list name character limit
+	MaxTweetLength           = 280 // X API tweet character limit
+	MaxUsernameLength        = 15  // X API username character limit (enforced by regex)
+	MaxDescriptionLength     = 160 // X API user description character limit
+	MaxListNameLength        = 25  // X API list name character limit
 	MaxListDescriptionLength = 100 // X API list description character limit
-	MaxSpaceTitleLength  = 70   // X API space title character limit
+	MaxSpaceTitleLength      = 70  // X API space title character limit
 )
 
 // State import limits to prevent memory exhaustion
 const (
-	MaxImportedUsers              = 10000
-	MaxImportedTweets             = 100000
-	MaxImportedLists              = 1000
-	MaxImportedSpaces             = 1000
-	MaxImportedMedia              = 10000
-	MaxImportedPolls              = 1000
-	MaxImportedPlaces             = 1000
-	MaxImportedTopics             = 1000
-	MaxImportedSearchStreamRules  = 1000
-	MaxImportedSearchWebhooks     = 100
-	MaxImportedDMConversations    = 1000
-	MaxImportedDMEvents           = 10000
-	MaxImportedComplianceJobs     = 100
-	MaxImportedCommunities        = 100
-	MaxImportedNews               = 1000
-	MaxImportedNotes               = 1000
+	MaxImportedUsers                 = 10000
+	MaxImportedTweets                = 100000
+	MaxImportedLists                 = 1000
+	MaxImportedSpaces                = 1000
+	MaxImportedMedia                 = 10000
+	MaxImportedPolls                 = 1000
+	MaxImportedPlaces                = 1000
+	MaxImportedTopics                = 1000
+	MaxImportedSearchStreamRules     = 1000
+	MaxImportedSearchWebhooks        = 100
+	MaxImportedDMConversations       = 1000
+	MaxImportedDMEvents              = 10000
+	MaxImportedComplianceJobs        = 100
+	MaxImportedCommunities           = 100
+	MaxImportedNews                  = 1000
+	MaxImportedNotes                 = 1000
 	MaxImportedActivitySubscriptions = 100
 )
 
 // Pre-compiled regex patterns for validation
 var (
-	emailRegex    = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
+	emailRegex     = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
 	numericIDRegex = regexp.MustCompile(`^\d+$`)
 	usernameRegex  = regexp.MustCompile(`^[A-Za-z0-9_]{1,15}$`)
 )
@@ -105,13 +108,13 @@ func ValidateRequestWithPathItem(r *http.Request, op *Operation, specPath string
 		queryParams = op.GetQueryParameters()
 	}
 	query := r.URL.Query()
-	
+
 	// Build map of valid parameter names for checking unknown parameters
 	validParamNames := make(map[string]bool)
 	for _, param := range queryParams {
 		validParamNames[param.Name] = true
 	}
-	
+
 	// Check for unknown query parameters (not in spec)
 	for paramName := range query {
 		// Skip field selection parameters and expansions - these are always valid
@@ -120,7 +123,7 @@ func ValidateRequestWithPathItem(r *http.Request, op *Operation, specPath string
 		if strings.HasSuffix(paramName, ".fields") || paramName == "expansions" {
 			continue
 		}
-		
+
 		if !validParamNames[paramName] {
 			errors = append(errors, &ValidationError{
 				Parameter: paramName,
@@ -129,7 +132,7 @@ func ValidateRequestWithPathItem(r *http.Request, op *Operation, specPath string
 			})
 		}
 	}
-	
+
 	// Validate each query parameter from spec
 	for _, param := range queryParams {
 		value := query.Get(param.Name)
@@ -183,7 +186,7 @@ func validateQueryParameterValue(value string, param Parameter, spec *OpenAPISpe
 	// Check if parameter is an array type (comma-separated)
 	if param.Schema != nil {
 		schema := param.Schema
-		
+
 		// Resolve $ref if present
 		if ref, ok := schema["$ref"].(string); ok {
 			resolved := spec.ResolveRef(ref)
@@ -191,15 +194,15 @@ func validateQueryParameterValue(value string, param Parameter, spec *OpenAPISpe
 				schema = resolved
 			}
 		}
-		
+
 		schemaType, _ := schema["type"].(string)
-		
+
 		// Handle array parameters (comma-separated values)
 		if schemaType == "array" {
 			return validateArrayParameter(value, param, schema, spec)
 		}
 	}
-	
+
 	// Fall back to standard validation
 	return validateParameterValue(value, param, spec)
 }
@@ -208,7 +211,7 @@ func validateQueryParameterValue(value string, param Parameter, spec *OpenAPISpe
 func validateArrayParameter(value string, param Parameter, schema map[string]interface{}, spec *OpenAPISpec) *ValidationError {
 	// Split comma-separated values
 	values := strings.Split(value, ",")
-	
+
 	// Validate minItems
 	if minItems, ok := schema["minItems"].(float64); ok {
 		if len(values) < int(minItems) {
@@ -219,7 +222,7 @@ func validateArrayParameter(value string, param Parameter, schema map[string]int
 			}
 		}
 	}
-	
+
 	// Validate maxItems
 	if maxItems, ok := schema["maxItems"].(float64); ok {
 		if len(values) > int(maxItems) {
@@ -230,7 +233,7 @@ func validateArrayParameter(value string, param Parameter, schema map[string]int
 			}
 		}
 	}
-	
+
 	// Validate each item
 	if items, ok := schema["items"].(map[string]interface{}); ok {
 		for i, itemValue := range values {
@@ -238,13 +241,13 @@ func validateArrayParameter(value string, param Parameter, schema map[string]int
 			if itemValue == "" {
 				continue // Skip empty values
 			}
-			
+
 			// Create a temporary parameter for item validation
 			itemParam := Parameter{
 				Name:   fmt.Sprintf("%s[%d]", param.Name, i),
 				Schema: items,
 			}
-			
+
 			if err := validateParameterValue(itemValue, itemParam, spec); err != nil {
 				return &ValidationError{
 					Parameter: param.Name,
@@ -254,7 +257,7 @@ func validateArrayParameter(value string, param Parameter, schema map[string]int
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -311,7 +314,7 @@ func validateParameterValue(value string, param Parameter, spec *OpenAPISpec) *V
 				}
 			}
 		}
-		
+
 		// Validate format (date-time, email, etc.)
 		if format, ok := schema["format"].(string); ok {
 			if err := validateFormat(value, format); err != nil {
@@ -502,11 +505,11 @@ func FormatValidationErrors(errors []*ValidationError) map[string]interface{} {
 	// Special handling for ids parameter errors - group them together
 	// Real API returns a single error with parameters.id array containing all invalid IDs
 	idErrors := make([]*ValidationError, 0)
-	fieldErrors := make([]*ValidationError, 0) // Field validation errors (tweet.fields, user.fields, etc.)
+	fieldErrors := make([]*ValidationError, 0)     // Field validation errors (tweet.fields, user.fields, etc.)
 	expansionErrors := make([]*ValidationError, 0) // Expansion validation errors
 	partitionErrors := make([]*ValidationError, 0) // Partition parameter errors
 	otherErrors := make([]*ValidationError, 0)
-	
+
 	for _, err := range errors {
 		// Check if this is an id/ids parameter error (could be "id" or "ids" from OpenAPI validation)
 		if err.Parameter == "id" || err.Parameter == "ids" {
@@ -524,9 +527,9 @@ func FormatValidationErrors(errors []*ValidationError) map[string]interface{} {
 			otherErrors = append(otherErrors, err)
 		}
 	}
-	
+
 	errorList := make([]map[string]interface{}, 0)
-	
+
 	// Handle ids parameter errors specially
 	if len(idErrors) > 0 {
 		invalidIds := make([]string, 0, len(idErrors))
@@ -546,7 +549,7 @@ func FormatValidationErrors(errors []*ValidationError) map[string]interface{} {
 			errorList = append(errorList, errorObj)
 		}
 	}
-	
+
 	// Handle field validation errors specially (tweet.fields, user.fields, etc.)
 	// Real API format: parameters.tweet.fields with message
 	for _, err := range fieldErrors {
@@ -562,7 +565,7 @@ func FormatValidationErrors(errors []*ValidationError) map[string]interface{} {
 		}
 		errorList = append(errorList, errorObj)
 	}
-	
+
 	// Handle expansion validation errors specially (expansions)
 	// Real API format: parameters.expansions with message
 	for _, err := range expansionErrors {
@@ -578,7 +581,7 @@ func FormatValidationErrors(errors []*ValidationError) map[string]interface{} {
 		}
 		errorList = append(errorList, errorObj)
 	}
-	
+
 	// Handle partition parameter errors specially (for streaming endpoints)
 	// Real API format: parameters.partition with empty array and message
 	for _, err := range partitionErrors {
@@ -595,7 +598,7 @@ func FormatValidationErrors(errors []*ValidationError) map[string]interface{} {
 		}
 		errorList = append(errorList, errorObj)
 	}
-	
+
 	// Handle other errors (pattern validation, type validation, etc.)
 	// Real API format for these errors uses only "parameters" and "message" fields
 	for _, err := range otherErrors {
@@ -603,7 +606,7 @@ func FormatValidationErrors(errors []*ValidationError) map[string]interface{} {
 		if err.Value != nil {
 			valueStr = fmt.Sprintf("%v", err.Value)
 		}
-		
+
 		// Check if this is a required parameter missing error
 		// Real API format: empty array in parameters, message "The `{param}` query parameter can not be empty"
 		if err.Message == "required query parameter is missing" {
@@ -616,13 +619,13 @@ func FormatValidationErrors(errors []*ValidationError) map[string]interface{} {
 			errorList = append(errorList, errorObj)
 			continue
 		}
-		
+
 		// Check if this is a pattern validation error or similar validation error
 		// Real API uses simplified format: only "parameters" and "message"
 		isPatternError := strings.Contains(err.Message, "does not match")
 		isTypeError := strings.Contains(err.Message, "must be") || strings.Contains(err.Message, "must have")
 		isFormatError := strings.Contains(err.Message, "must be a valid")
-		
+
 		if isPatternError || isTypeError || isFormatError {
 			// Use simplified format matching real API
 			errorObj := map[string]interface{}{
@@ -640,7 +643,7 @@ func FormatValidationErrors(errors []*ValidationError) map[string]interface{} {
 				},
 				"message": err.Message,
 			}
-			
+
 			// Add resource_id and resource_type if provided
 			if err.ResourceID != "" {
 				errorObj["resource_id"] = err.ResourceID
@@ -648,7 +651,7 @@ func FormatValidationErrors(errors []*ValidationError) map[string]interface{} {
 			if err.ResourceType != "" {
 				errorObj["resource_type"] = err.ResourceType
 			}
-			
+
 			errorList = append(errorList, errorObj)
 		}
 	}
@@ -676,11 +679,12 @@ func FormatSingleValidationError(err *ValidationError) map[string]interface{} {
 	errorObj := map[string]interface{}{
 		"parameter": err.Parameter,
 		"value":     valueStr,
+		"message":   err.Message,
 		"detail":    err.Message,
 		"title":     "Invalid Request",
 		"type":      "https://api.twitter.com/2/problems/invalid-request",
 	}
-	
+
 	// Add resource_id and resource_type if provided
 	if err.ResourceID != "" {
 		errorObj["resource_id"] = err.ResourceID
@@ -688,12 +692,12 @@ func FormatSingleValidationError(err *ValidationError) map[string]interface{} {
 	if err.ResourceType != "" {
 		errorObj["resource_type"] = err.ResourceType
 	}
-	
+
 	// Also include parameters map for compatibility
 	errorObj["parameters"] = map[string]interface{}{
 		err.Parameter: []string{valueStr},
 	}
-	
+
 	return map[string]interface{}{
 		"errors": []map[string]interface{}{errorObj},
 		"title":  "Invalid Request",
@@ -702,41 +706,67 @@ func FormatSingleValidationError(err *ValidationError) map[string]interface{} {
 	}
 }
 
-// ValidateRequestBody validates a request body against the OpenAPI requestBody schema
-func ValidateRequestBody(body []byte, op *Operation, spec *OpenAPISpec) []*ValidationError {
+// ValidateRequestBody validates a request body against the OpenAPI requestBody schema.
+// Parsing is selected from the actual Content-Type instead of assuming JSON.
+func ValidateRequestBody(
+	body []byte,
+	contentType string,
+	op *Operation,
+	spec *OpenAPISpec,
+) []*ValidationError {
 	var errors []*ValidationError
 
-	// Check if operation requires a request body
 	if op.RequestBody == nil {
-		// No request body expected
-		if len(body) > 0 {
-			// Body provided but not expected - this is usually OK, but we could warn
-			return nil
-		}
 		return nil
 	}
 
-	// Get request body schema early to check if it has properties
-	schema := op.GetRequestBodySchema()
-	hasProperties := false
+	mediaType := "application/json"
+
+	if strings.TrimSpace(contentType) != "" {
+		parsedMediaType, _, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			return []*ValidationError{
+				{
+					Parameter: "requestBody",
+					Message:   fmt.Sprintf("invalid Content-Type: %v", err),
+					Value:     contentType,
+				},
+			}
+		}
+
+		mediaType = parsedMediaType
+	}
+
+	// Select the schema declared for the actual request Content-Type.
+	schema := op.GetRequestBodySchemaForContentType(mediaType)
+
+	// Preserve previous behavior as a fallback for endpoints/specs where
+	// Content-Type is absent or incomplete.
+	if schema == nil {
+		schema = op.GetRequestBodySchema()
+	}
+
+	// Resolve the top-level schema once.
+	resolvedSchema := schema
 	if schema != nil {
-		// Resolve $ref if present to check the actual schema
-		resolvedSchema := schema
 		if ref, ok := schema["$ref"].(string); ok && spec != nil {
 			if resolved := spec.ResolveRef(ref); resolved != nil {
 				resolvedSchema = resolved
 			}
 		}
-		
-		// Check if resolved schema has properties
+	}
+
+	hasProperties := false
+
+	if resolvedSchema != nil {
 		if properties, ok := resolvedSchema["properties"].(map[string]interface{}); ok && len(properties) > 0 {
 			hasProperties = true
 		}
-		// Also check if there are required fields in the schema
+
 		if requiredFields, ok := resolvedSchema["required"].([]interface{}); ok && len(requiredFields) > 0 {
 			hasProperties = true
 		}
-		// Check for allOf/oneOf/anyOf that might contain properties
+
 		if allOf, ok := resolvedSchema["allOf"].([]interface{}); ok {
 			for _, item := range allOf {
 				if itemMap, ok := item.(map[string]interface{}); ok {
@@ -748,52 +778,183 @@ func ValidateRequestBody(body []byte, op *Operation, spec *OpenAPISpec) []*Valid
 			}
 		}
 	}
-	
-	// Check if request body is required but missing
-	// However, if the schema is empty (no properties), allow empty body even if required
-	// Only require body if it's marked as required AND the schema has properties/required fields
+
 	if op.RequestBody.Required && len(body) == 0 && hasProperties {
-		errors = append(errors, &ValidationError{
-			Parameter: "requestBody",
-			Message:   "request body is required",
-			Value:     nil,
-		})
-		return errors
+		return []*ValidationError{
+			{
+				Parameter: "requestBody",
+				Message:   "request body is required",
+				Value:     nil,
+			},
+		}
 	}
 
-	// If no body and not required (or schema is empty), that's fine
 	if len(body) == 0 {
 		return nil
 	}
 
-	// Parse JSON body
-	var bodyData interface{}
-	if err := json.Unmarshal(body, &bodyData); err != nil {
-		errors = append(errors, &ValidationError{
-			Parameter: "requestBody",
-			Message:   fmt.Sprintf("invalid JSON: %v", err),
-			Value:     string(body),
-		})
-		return errors
-	}
-	if schema == nil {
-		// No schema to validate against - that's OK
+	// No schema means there is nothing further to validate.
+	if resolvedSchema == nil {
 		return nil
 	}
 
-	// Resolve $ref if present
-	if ref, ok := schema["$ref"].(string); ok {
-		resolved := spec.ResolveRef(ref)
-		if resolved != nil {
-			schema = resolved
+	var bodyData interface{}
+
+	switch mediaType {
+	case "multipart/form-data":
+		multipartData, err := parseMultipartBodyForValidation(
+			body,
+			contentType,
+			resolvedSchema,
+		)
+		if err != nil {
+			return []*ValidationError{
+				{
+					Parameter: "requestBody",
+					Message:   fmt.Sprintf("invalid multipart/form-data: %v", err),
+					Value:     "<multipart body>",
+				},
+			}
+		}
+
+		bodyData = multipartData
+
+	default:
+		if err := json.Unmarshal(body, &bodyData); err != nil {
+			return []*ValidationError{
+				{
+					Parameter: "requestBody",
+					Message:   fmt.Sprintf("invalid JSON: %v", err),
+					Value:     string(body),
+				},
+			}
 		}
 	}
 
-	// Validate body against schema
-	bodyErrors := validateValueAgainstSchema(bodyData, schema, spec, "requestBody")
+	bodyErrors := validateValueAgainstSchema(
+		bodyData,
+		resolvedSchema,
+		spec,
+		"requestBody",
+	)
+
 	errors = append(errors, bodyErrors...)
 
 	return errors
+}
+
+// parseMultipartBodyForValidation converts multipart fields into the generic
+// representation expected by validateValueAgainstSchema.
+//
+// File fields are represented by their filename because OpenAPI models binary
+// uploads as string/binary. The real bytes are processed later by the endpoint
+// handler.
+func parseMultipartBodyForValidation(
+	body []byte,
+	contentType string,
+	schema map[string]interface{},
+) (map[string]interface{}, error) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, err
+	}
+
+	boundary := params["boundary"]
+	if boundary == "" {
+		return nil, fmt.Errorf("multipart boundary is missing")
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+
+	form, err := reader.ReadForm(MaxRequestSize)
+	if err != nil {
+		return nil, err
+	}
+	defer form.RemoveAll()
+
+	result := make(map[string]interface{})
+
+	properties, _ := schema["properties"].(map[string]interface{})
+
+	for name, values := range form.Value {
+		if len(values) == 0 {
+			continue
+		}
+
+		var propertySchema map[string]interface{}
+		if rawProperty, exists := properties[name]; exists {
+			propertySchema, _ = rawProperty.(map[string]interface{})
+		}
+
+		if propertySchema != nil {
+			if propertyType, _ := propertySchema["type"].(string); propertyType == "array" {
+				itemsSchema, _ := propertySchema["items"].(map[string]interface{})
+
+				items := make([]interface{}, 0, len(values))
+				for _, value := range values {
+					items = append(
+						items,
+						coerceMultipartScalar(value, itemsSchema),
+					)
+				}
+
+				result[name] = items
+				continue
+			}
+		}
+
+		result[name] = coerceMultipartScalar(values[0], propertySchema)
+	}
+
+	for name, files := range form.File {
+		if len(files) == 0 {
+			continue
+		}
+
+		if len(files) == 1 {
+			result[name] = files[0].Filename
+			continue
+		}
+
+		fileNames := make([]interface{}, 0, len(files))
+		for _, file := range files {
+			fileNames = append(fileNames, file.Filename)
+		}
+
+		result[name] = fileNames
+	}
+
+	return result, nil
+}
+
+func coerceMultipartScalar(
+	value string,
+	schema map[string]interface{},
+) interface{} {
+	if schema == nil {
+		return value
+	}
+
+	schemaType, _ := schema["type"].(string)
+
+	switch schemaType {
+	case "integer":
+		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return parsed
+		}
+
+	case "number":
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+			return parsed
+		}
+
+	case "boolean":
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			return parsed
+		}
+	}
+
+	return value
 }
 
 // validateValueAgainstSchema validates a value against an OpenAPI schema
@@ -1215,7 +1376,7 @@ func ValidateStateImport(importData *StateExport) []*ValidationError {
 	if importData.ActivitySubscriptions != nil {
 		totalEntities += len(importData.ActivitySubscriptions)
 	}
-	
+
 	if totalEntities > MaxTotalImportedEntities {
 		errors = append(errors, &ValidationError{
 			Parameter: "total_entities",
@@ -1280,11 +1441,11 @@ func ValidateStateImport(importData *StateExport) []*ValidationError {
 func SanitizeInput(input string) string {
 	// HTML escape to prevent XSS
 	sanitized := html.EscapeString(input)
-	
+
 	// Filter control characters (keep newlines \n and tabs \t)
 	var result strings.Builder
 	result.Grow(len(sanitized))
-	
+
 	for _, r := range sanitized {
 		// Allow printable characters, newlines, and tabs
 		if unicode.IsPrint(r) || r == '\n' || r == '\t' {
@@ -1292,7 +1453,7 @@ func SanitizeInput(input string) string {
 		}
 		// All other control characters are filtered out
 	}
-	
+
 	return result.String()
 }
 
@@ -1301,16 +1462,16 @@ func SanitizeInput(input string) string {
 func SanitizeInputForDisplay(input string) string {
 	// HTML escape
 	sanitized := html.EscapeString(input)
-	
+
 	// Filter all control characters
 	var result strings.Builder
 	result.Grow(len(sanitized))
-	
+
 	for _, r := range sanitized {
 		if unicode.IsPrint(r) {
 			result.WriteRune(r)
 		}
 	}
-	
+
 	return result.String()
 }

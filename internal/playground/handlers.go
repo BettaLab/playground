@@ -126,6 +126,25 @@ func handleTweets(state *State) http.HandlerFunc {
 			}
 
 			user := state.GetDefaultUser()
+
+			// Playground-only testing extension.
+			// Allows creating a tweet as any user already loaded in the mock state.
+			// This header is NOT part of the real X API and must only be used
+			// by development/test tooling.
+			if mockUserID := r.Header.Get("X-Playground-User-ID"); mockUserID != "" {
+				user = state.GetUserByID(mockUserID)
+
+				if user == nil {
+					WriteError(
+						w,
+						http.StatusBadRequest,
+						"Mock user specified by X-Playground-User-ID not found",
+						400,
+					)
+					return
+				}
+			}
+
 			if user == nil {
 				WriteError(w, http.StatusInternalServerError, "Default user not found", 500)
 				return

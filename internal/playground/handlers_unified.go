@@ -126,7 +126,7 @@ func getDeveloperAccountID(r *http.Request, state *State) string {
 
 	// Try to extract developer account ID from different auth methods
 	authLower := strings.ToLower(authHeader)
-	
+
 	// Bearer token (OAuth 2.0 App-Only or User Context)
 	if strings.HasPrefix(authLower, "bearer ") {
 		token := strings.TrimSpace(authHeader[7:])
@@ -138,7 +138,7 @@ func getDeveloperAccountID(r *http.Request, state *State) string {
 		// This ensures consistent mapping: same token = same developer account
 		return deriveDeveloperAccountFromToken(token)
 	}
-	
+
 	// OAuth 1.0a: Extract consumer key from Authorization header
 	// Format: OAuth oauth_consumer_key="...", oauth_token="...", etc.
 	if strings.HasPrefix(authLower, "oauth ") {
@@ -153,7 +153,7 @@ func getDeveloperAccountID(r *http.Request, state *State) string {
 			return deriveDeveloperAccountFromToken(consumerKey)
 		}
 	}
-	
+
 	// Fallback: Use authenticated user ID
 	// This maintains backward compatibility for simple auth scenarios
 	return getAuthenticatedUserID(r, state)
@@ -166,23 +166,23 @@ func deriveDeveloperAccountFromToken(token string) string {
 	if token == "" {
 		return "0"
 	}
-	
+
 	// Default playground placeholder credentials map to account "0"
-	if token == "test" || token == "Bearer test" || 
-	   token == "your_consumer_key_here" || token == "your_access_token_here" {
+	if token == "test" || token == "Bearer test" ||
+		token == "your_consumer_key_here" || token == "your_access_token_here" {
 		return "0"
 	}
-	
+
 	// Simple hash to convert token to a consistent account ID
 	// This ensures same token = same developer account
 	hash := 0
 	for _, c := range token {
 		hash = hash*31 + int(c)
 	}
-	
+
 	// Convert to positive number and use modulo to keep IDs reasonable
 	accountID := (hash & 0x7FFFFFFF) % 1000
-	
+
 	return strconv.Itoa(accountID)
 }
 
@@ -216,12 +216,12 @@ func countResourcesFromResponse(responseData []byte) int {
 	if len(responseData) == 0 {
 		return 0
 	}
-	
+
 	var response map[string]interface{}
 	if err := json.Unmarshal(responseData, &response); err != nil {
 		return 0
 	}
-	
+
 	// Check for data array
 	if data, exists := response["data"]; exists {
 		switch v := data.(type) {
@@ -233,7 +233,7 @@ func countResourcesFromResponse(responseData []byte) int {
 			return 1
 		}
 	}
-	
+
 	// Check for includes (expansions)
 	if includes, exists := response["includes"]; exists {
 		if includesMap, ok := includes.(map[string]interface{}); ok {
@@ -254,7 +254,7 @@ func countResourcesFromResponse(responseData []byte) int {
 			return total
 		}
 	}
-	
+
 	return 0
 }
 
@@ -272,20 +272,20 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 			return &RateLimitConfig{Enabled: false}
 		})
 	}
-	
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Track active requests for graceful shutdown (skip health/status endpoints)
 		if server != nil && !strings.HasPrefix(r.URL.Path, "/health") && !strings.HasPrefix(r.URL.Path, "/rate-limits") {
 			atomic.AddInt64(&server.activeReqs, 1)
 			defer atomic.AddInt64(&server.activeReqs, -1)
 		}
-		
+
 		// Handle CORS preflight requests
 		if r.Method == "OPTIONS" {
 			HandleOptions(w, r)
 			return
 		}
-		
+
 		// Check original request context first (before creating timeout context)
 		// This handles cases where the client already disconnected
 		select {
@@ -298,7 +298,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 			// If it's a deadline exceeded, we'll handle it below after creating timeout context
 		default:
 		}
-		
+
 		// Add request timeout for non-streaming endpoints (30 seconds)
 		// Streaming endpoints check context in their loops
 		var ctx context.Context
@@ -308,7 +308,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 			defer cancel()
 			r = r.WithContext(ctx)
 		}
-		
+
 		// Check for timeout after creating timeout context
 		select {
 		case <-r.Context().Done():
@@ -326,35 +326,73 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 			return
 		default:
 		}
-		
+
 		requestID := AddRequestID(w, r)
 		_ = requestID
-		
+
 		AddCORSHeaders(w, r)
 		r.Body = http.MaxBytesReader(w, r.Body, MaxRequestSize)
 		startTime := time.Now()
-		
+
 		if !strings.HasPrefix(r.URL.Path, "/health") && !strings.HasPrefix(r.URL.Path, "/rate-limits") {
 			IncrementRequestsTotal()
 		}
-		
+
 		path := r.URL.Path
 		method := r.Method
 		pathWithoutQuery := strings.Split(path, "?")[0]
-		
+
 		wrappedWriter := &responseTimeWriter{
 			ResponseWriter: w,
 			startTime:      startTime,
 		}
 		wrappedWriter.Header().Set("X-Internal-Path", path)
 		w = wrappedWriter
-		
+
+		// Playground-local media content endpoint.
+		//
+		// This is not an X API operation. It only acts as the local equivalent of
+		// pbs.twimg.com so URLs returned in includes.media are actually renderable.
+		if method == http.MethodGet &&
+			strings.HasPrefix(pathWithoutQuery, "/2/media/content/") {
+
+			mediaKey := strings.TrimPrefix(
+				pathWithoutQuery,
+				"/2/media/content/",
+			)
+
+			if mediaKey == "" || state == nil {
+				http.NotFound(w, r)
+				return
+			}
+
+			content, contentType, ok := state.GetMediaContentByKey(mediaKey)
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+
+			if contentType == "" {
+				contentType = "application/octet-stream"
+			}
+
+			w.Header().Set("Content-Type", contentType)
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusOK)
+
+			if _, err := w.Write(content); err != nil {
+				log.Printf("Error writing media content: %v", err)
+			}
+
+			return
+		}
+
 		// Find matching operations in OpenAPI spec (needed for auth validation)
 		// Find operation matching the HTTP method
 		// CRITICAL: Check exact path FIRST before pattern matching
 		// This prevents paths like /2/users/personalized_trends from matching /2/users/{username}
 		var matchedOp *EndpointOperation
-		
+
 		// First, check if exact path exists in spec (highest priority)
 		if pathItem, exists := spec.Paths[pathWithoutQuery]; exists {
 			// Exact path exists - extract operations and find method match
@@ -366,7 +404,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 				}
 			}
 		}
-		
+
 		// Only if no exact match, try pattern matching
 		if matchedOp == nil {
 			// SIMPLE CHECK: If the last segment of the path has underscores, it's likely a literal endpoint
@@ -377,7 +415,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 				lastSegment = pathParts[len(pathParts)-1]
 			}
 			hasUnderscoreInLastSegment := strings.Contains(lastSegment, "_")
-			
+
 			operations := spec.GetEndpointOperations(pathWithoutQuery)
 			for _, op := range operations {
 				if op.Method == method {
@@ -397,14 +435,14 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 								}
 							}
 						}
-						
+
 						matchedOp = &op
 						break
 					}
 				}
 			}
 		}
-		
+
 		// Check authentication requirements (before rate limiting)
 		// This ensures we return proper auth errors matching the real X API
 		// Use OpenAPI operation's security requirements if available
@@ -422,7 +460,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 		var rateLimitRemaining int = -1
 		var rateLimitResetTime time.Time
 		var activeRateLimitConfig *RateLimitConfig
-		
+
 		// Always check for endpoint-specific rate limit first (regardless of rate limiter config)
 		// This ensures endpoint-specific limits are always applied when available
 		credentials := GetAPICredentials(r)
@@ -438,7 +476,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 				WindowSec: endpointLimit.WindowSec,
 				Enabled:   true,
 			}
-			
+
 			// CRITICAL: Use the matched endpoint pattern as the rate limit key, not the full path
 			// This ensures /2/lists/0, /2/lists/1, etc. all share the same rate limit as /2/lists
 			// The endpointLimit.Endpoint is the pattern that matched (e.g., "/2/lists")
@@ -453,7 +491,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 					rateLimitKey = rateLimitKey[:len(rateLimitKey)-1]
 				}
 			}
-			
+
 			if rateLimiter != nil {
 				// Create rate limiter with endpoint-specific config but share request tracking
 				// Use a config getter that returns the endpoint-specific config
@@ -511,8 +549,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 			// No rate limiter and no endpoint-specific limit, use default
 			activeRateLimitConfig = GetDefaultRateLimit()
 		}
-		
-		
+
 		// Check authentication requirements (after rate limiting so we can show correct limits)
 		if isValid, authError := ValidateAuth(method, path, r, opForAuth, authConfig); !isValid {
 			// Set rate limit headers before writing auth error
@@ -533,7 +570,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 			WriteAuthError(w, authError)
 			return
 		}
-		
+
 		// Get pathItem for path-level parameters
 		var pathItem *PathItem
 		if matchedOp != nil {
@@ -541,7 +578,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 				pathItem = &pathItemData
 			}
 		}
-		
+
 		// Parse query parameters (pass operation, spec, and pathItem for OpenAPI-based defaults/limits)
 		var op *Operation
 		if matchedOp != nil {
@@ -553,7 +590,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 		// These need to be checked BEFORE logging warnings or returning 404
 		normalizedPathForStateful := strings.TrimSuffix(strings.Split(path, "?")[0], "/")
 		hasStatefulHandler := false
-		
+
 		// Check for GET /2/media/{media_key} - handle before OpenAPI matching
 		if method == "GET" && matchedOp == nil && strings.HasPrefix(normalizedPathForStateful, "/2/media/") && normalizedPathForStateful != "/2/media" {
 			if state != nil {
@@ -611,21 +648,21 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 				}
 			}
 		}
-		
+
 		if matchedOp == nil {
 			// Check for known stateful POST endpoints
 			if method == "POST" {
 				if (strings.HasPrefix(normalizedPathForStateful, "/2/users/") && strings.HasSuffix(normalizedPathForStateful, "/blocking")) ||
-				   (strings.HasPrefix(normalizedPathForStateful, "/2/users/") && strings.HasSuffix(normalizedPathForStateful, "/muting")) ||
-				   (strings.HasPrefix(normalizedPathForStateful, "/2/users/") && strings.HasSuffix(normalizedPathForStateful, "/following")) ||
-				   (normalizedPathForStateful == "/2/lists") {
+					(strings.HasPrefix(normalizedPathForStateful, "/2/users/") && strings.HasSuffix(normalizedPathForStateful, "/muting")) ||
+					(strings.HasPrefix(normalizedPathForStateful, "/2/users/") && strings.HasSuffix(normalizedPathForStateful, "/following")) ||
+					(normalizedPathForStateful == "/2/lists") {
 					hasStatefulHandler = true
 				}
 			}
 			// Check for known stateful DELETE endpoints
 			if method == "DELETE" {
 				if (strings.HasPrefix(normalizedPathForStateful, "/2/users/") && strings.Contains(normalizedPathForStateful, "/blocking/")) ||
-				   (strings.HasPrefix(normalizedPathForStateful, "/2/users/") && strings.Contains(normalizedPathForStateful, "/muting/")) {
+					(strings.HasPrefix(normalizedPathForStateful, "/2/users/") && strings.Contains(normalizedPathForStateful, "/muting/")) {
 					hasStatefulHandler = true
 				}
 			}
@@ -662,12 +699,12 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 						}
 						data, statusCode := MarshalJSONResponse(response)
 						AddXAPIHeaders(w)
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(statusCode)
-					if _, err := w.Write(data); err != nil {
-						log.Printf("Error writing response: %v", err)
-					}
-					return
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(statusCode)
+						if _, err := w.Write(data); err != nil {
+							log.Printf("Error writing response: %v", err)
+						}
+						return
 					}
 				}
 			}
@@ -686,12 +723,12 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 						}
 						data, statusCode := MarshalJSONResponse(response)
 						AddXAPIHeaders(w)
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(statusCode)
-					if _, err := w.Write(data); err != nil {
-						log.Printf("Error writing response: %v", err)
-					}
-					return
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(statusCode)
+						if _, err := w.Write(data); err != nil {
+							log.Printf("Error writing response: %v", err)
+						}
+						return
 					}
 				}
 			}
@@ -743,19 +780,19 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 			idsParam := r.URL.Query().Get("ids")
 			if idsParam != "" {
 				ids := strings.Split(idsParam, ",")
-			// Limit to maximum number of IDs
-			if len(ids) > MaxQueryParameterIDs {
-				errorResp := CreateValidationErrorResponse("ids", "", fmt.Sprintf("Maximum %d IDs allowed per request", MaxQueryParameterIDs))
-				data, statusCode := MarshalJSONErrorResponse(errorResp)
-				AddXAPIHeaders(w)
+				// Limit to maximum number of IDs
+				if len(ids) > MaxQueryParameterIDs {
+					errorResp := CreateValidationErrorResponse("ids", "", fmt.Sprintf("Maximum %d IDs allowed per request", MaxQueryParameterIDs))
+					data, statusCode := MarshalJSONErrorResponse(errorResp)
+					AddXAPIHeaders(w)
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(statusCode)
 					if _, err := w.Write(data); err != nil {
 						log.Printf("Error writing response: %v", err)
 					}
 					return
-			}
-			var invalidIds []string
+				}
+				var invalidIds []string
 				for _, id := range ids {
 					id = strings.TrimSpace(id)
 					if err := ValidateSnowflakeID(id); err != nil {
@@ -904,7 +941,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 				}
 			}
 		}
-		
+
 		// Only validate if we have a matched operation
 		if matchedOp != nil {
 			// Use pathItem to include path-level parameters in validation
@@ -1031,7 +1068,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 			}
 
 			// Validate request body against OpenAPI schema
-			if bodyValidationErrors := ValidateRequestBody(bodyBytes, matchedOp.Operation, spec); len(bodyValidationErrors) > 0 {
+			if bodyValidationErrors := ValidateRequestBody(bodyBytes, r.Header.Get("Content-Type"), matchedOp.Operation, spec); len(bodyValidationErrors) > 0 {
 				errorResponse := FormatValidationErrors(bodyValidationErrors)
 				errorJSON, statusCode := MarshalJSONErrorResponse(errorResponse)
 				// Set rate limit headers if available
@@ -1065,7 +1102,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 		// Rule management endpoints: /2/tweets/search/stream/rules and /2/tweets/search/stream/rules/*
 		// Check this BEFORE any streaming pattern matching
 		isRuleManagementEndpoint := strings.Contains(path, "/stream/rules")
-		
+
 		// Skip streaming check entirely for rule management endpoints
 		// This must happen before any streaming detection
 		if !isRuleManagementEndpoint {
@@ -1073,18 +1110,18 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 			// For /search/stream, only match if it's exactly /search/stream (not /search/stream/rules)
 			// But allow /firehose/stream/lang/{lang} and similar patterns
 			isStreamingPath := strings.HasSuffix(path, "/stream") ||
-			                  (strings.Contains(path, "/sample/stream") && !strings.Contains(path, "/sample/stream/rules")) ||
-			                  (strings.Contains(path, "/sample10/stream") && !strings.Contains(path, "/sample10/stream/rules")) ||
-			                  (path == "/2/tweets/search/stream" || strings.HasPrefix(path, "/2/tweets/search/stream?") || strings.Contains(path, "/search/stream/lang/")) ||
-			                  (strings.Contains(path, "/firehose/stream") && !strings.Contains(path, "/firehose/stream/rules")) ||
-			                  (strings.Contains(path, "/compliance/stream") && !strings.Contains(path, "/compliance/stream/rules"))
-			
+				(strings.Contains(path, "/sample/stream") && !strings.Contains(path, "/sample/stream/rules")) ||
+				(strings.Contains(path, "/sample10/stream") && !strings.Contains(path, "/sample10/stream/rules")) ||
+				(path == "/2/tweets/search/stream" || strings.HasPrefix(path, "/2/tweets/search/stream?") || strings.Contains(path, "/search/stream/lang/")) ||
+				(strings.Contains(path, "/firehose/stream") && !strings.Contains(path, "/firehose/stream/rules")) ||
+				(strings.Contains(path, "/compliance/stream") && !strings.Contains(path, "/compliance/stream/rules"))
+
 			// Check OpenAPI spec
 			isStreamingInSpec := false
 			if matchedOp != nil && matchedOp.Operation != nil {
 				isStreamingInSpec = matchedOp.Operation.IsStreamingEndpoint()
 			}
-			
+
 			if isStreamingPath || isStreamingInSpec {
 				var creditTracker *CreditTracker
 				if server != nil {
@@ -1179,7 +1216,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 
 		// Handle stateful operations (check before examples to use real data)
 		responseData, statusCode := handleStatefulOperation(matchedOp, path, method, r, state, spec, queryParams, pathItem)
-		
+
 		if responseData != nil {
 			if statusCode == http.StatusNoContent || len(responseData) == 0 {
 				// Empty response (e.g., 204 No Content for append)
@@ -1248,53 +1285,53 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 		if !strings.Contains(path, "/stream") && !strings.Contains(path, "/search/recent") && pathWithoutQuery != "/2/connections/all" && pathWithoutQuery != "/2/connections/all/" {
 			example := examples.FindBestMatch(method, pathWithoutQuery)
 			if example != nil {
-			// Use example as template, but filter based on query params
-			responseData := filterResponseByQueryParams(example.Response, queryParams, matchedOp)
-			
-			// CRITICAL: Remove errors from example responses - examples shouldn't include errors in successful responses
-			// Example files may contain errors for testing, but we shouldn't return them for normal requests
-			// Only return errors if this is actually an error response (4xx/5xx), not a 200 OK response
-			// responseData is already map[string]interface{} from filterResponseByQueryParams
-			if errors, hasErrors := responseData["errors"]; hasErrors {
-				// Check if errors array has entries
-				if errorsArray, ok := errors.([]interface{}); ok && len(errorsArray) > 0 {
-					// Remove errors from successful responses - examples shouldn't pollute normal responses
-					// Errors should only come from actual error conditions (validation, auth, rate limits, etc.)
-					delete(responseData, "errors")
-					log.Printf("DEBUG: Removed %d errors from example response for %s %s", len(errorsArray), method, pathWithoutQuery)
+				// Use example as template, but filter based on query params
+				responseData := filterResponseByQueryParams(example.Response, queryParams, matchedOp)
+
+				// CRITICAL: Remove errors from example responses - examples shouldn't include errors in successful responses
+				// Example files may contain errors for testing, but we shouldn't return them for normal requests
+				// Only return errors if this is actually an error response (4xx/5xx), not a 200 OK response
+				// responseData is already map[string]interface{} from filterResponseByQueryParams
+				if errors, hasErrors := responseData["errors"]; hasErrors {
+					// Check if errors array has entries
+					if errorsArray, ok := errors.([]interface{}); ok && len(errorsArray) > 0 {
+						// Remove errors from successful responses - examples shouldn't pollute normal responses
+						// Errors should only come from actual error conditions (validation, auth, rate limits, etc.)
+						delete(responseData, "errors")
+						log.Printf("DEBUG: Removed %d errors from example response for %s %s", len(errorsArray), method, pathWithoutQuery)
+					}
+				}
+
+				responseJSON, err := json.MarshalIndent(responseData, "", "  ")
+				if err == nil {
+					// Set rate limit headers if available
+					if activeRateLimitConfig != nil {
+						// Use rate limit remaining if set, otherwise calculate from config
+						remaining := rateLimitRemaining
+						if remaining < 0 {
+							remaining = activeRateLimitConfig.Limit - 1 // Assume one request used
+						}
+						resetTime := rateLimitResetTime
+						if resetTime.IsZero() {
+							resetTime = time.Now().Add(time.Duration(activeRateLimitConfig.WindowSec) * time.Second)
+						}
+						AddXAPIHeadersWithRateLimit(w, activeRateLimitConfig, remaining, resetTime)
+					} else {
+						AddXAPIHeaders(w)
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					if _, err := w.Write(responseJSON); err != nil {
+						log.Printf("Error writing response: %v", err)
+					}
+					// Track credit usage for example responses
+					if server != nil && server.creditTracker != nil {
+						accountID := getAuthenticatedUserID(r, state)
+						server.creditTracker.TrackUsage(accountID, method, pathWithoutQuery, responseJSON, http.StatusOK)
+					}
+					return
 				}
 			}
-			
-			responseJSON, err := json.MarshalIndent(responseData, "", "  ")
-			if err == nil {
-				// Set rate limit headers if available
-				if activeRateLimitConfig != nil {
-					// Use rate limit remaining if set, otherwise calculate from config
-					remaining := rateLimitRemaining
-					if remaining < 0 {
-						remaining = activeRateLimitConfig.Limit - 1 // Assume one request used
-					}
-					resetTime := rateLimitResetTime
-					if resetTime.IsZero() {
-						resetTime = time.Now().Add(time.Duration(activeRateLimitConfig.WindowSec) * time.Second)
-					}
-					AddXAPIHeadersWithRateLimit(w, activeRateLimitConfig, remaining, resetTime)
-				} else {
-					AddXAPIHeaders(w)
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				if _, err := w.Write(responseJSON); err != nil {
-					log.Printf("Error writing response: %v", err)
-				}
-				// Track credit usage for example responses
-				if server != nil && server.creditTracker != nil {
-					accountID := getAuthenticatedUserID(r, state)
-					server.creditTracker.TrackUsage(accountID, method, pathWithoutQuery, responseJSON, http.StatusOK)
-				}
-				return
-			}
-		}
 		}
 
 		// Fall back to OpenAPI schema generation
@@ -1304,7 +1341,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 		}
 
 		if responseSchema != nil {
-			
+
 			responseData, err := GenerateResponseFromSchemaWithState(responseSchema, spec, queryParams, state)
 			if err != nil {
 				WriteError(w, http.StatusInternalServerError, "Failed to generate response", 500)
@@ -1326,7 +1363,7 @@ func createUnifiedOpenAPIHandler(spec *OpenAPISpec, state *State, examples *Exam
 			// Fallback to generic response
 			WriteJSONSafe(w, http.StatusOK, map[string]interface{}{
 				"data": map[string]interface{}{
-					"message": fmt.Sprintf("Mock response for %s %s", method, path),
+					"message":      fmt.Sprintf("Mock response for %s %s", method, path),
 					"operation_id": matchedOp.Operation.OperationID,
 				},
 			})
@@ -1361,23 +1398,23 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		log.Printf("ERROR: state is nil for %s %s - this should never happen. State should be initialized at server startup.", method, path)
 		return formatStateNilError()
 	}
-	
+
 	// Normalize path once at the start
 	normalizedPath := strings.TrimSuffix(strings.Split(path, "?")[0], "/")
-	
+
 	// DELETE /2/connections/all - handle FIRST before other handlers
 	// Check both with and without trailing slash to be safe
 	// Also check the raw path to catch any edge cases
 	if method == "DELETE" {
 		pathCheck := strings.TrimSuffix(strings.TrimPrefix(path, "/"), "/")
-		if normalizedPath == "/2/connections/all" || normalizedPath == "/2/connections/all/" || 
-		   pathCheck == "2/connections/all" || strings.HasSuffix(path, "/2/connections/all") || 
-		   strings.HasSuffix(path, "/2/connections/all/") {
+		if normalizedPath == "/2/connections/all" || normalizedPath == "/2/connections/all/" ||
+			pathCheck == "2/connections/all" || strings.HasSuffix(path, "/2/connections/all") ||
+			strings.HasSuffix(path, "/2/connections/all/") {
 			// Get authenticated user ID and close all their streaming connections
 			authenticatedUserID := getAuthenticatedUserID(r, state)
 			closedCount := state.CloseAllStreamConnectionsForUser(authenticatedUserID)
 			log.Printf("DELETE /2/connections/all: Closed %d stream connection(s) for user %s", closedCount, authenticatedUserID)
-			
+
 			// Return correct format matching real API: {"data": {"attempted": true}}
 			// Real API returns 200 with {"data": {"attempted": true}} - no errors
 			// Always return this format, don't try to use OpenAPI schema generation
@@ -1390,7 +1427,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			return data, statusCode
 		}
 	}
-	
+
 	// DELETE /2/users/{id}/blocking/{target_user_id} (OpenAPI path) - check FIRST
 	if method == "DELETE" && strings.HasPrefix(normalizedPath, "/2/users/") && strings.Contains(normalizedPath, "/blocking/") {
 		// Split on /blocking/ to separate user path from target user ID
@@ -1436,7 +1473,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			}
 		}
 	}
-	
+
 	// POST /2/users/{id}/blocking (OpenAPI path) - check VERY FIRST
 	if method == "POST" && strings.HasPrefix(normalizedPath, "/2/users/") && strings.HasSuffix(normalizedPath, "/blocking") {
 		parts := strings.Split(normalizedPath, "/users/")
@@ -1452,25 +1489,25 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					data, statusCode := MarshalJSONErrorResponse(errorResp)
 					return data, statusCode
 				}
-				
+
 				if len(bodyBytes) == 0 {
 					errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 					data, statusCode := MarshalJSONErrorResponse(errorResp)
 					return data, statusCode
 				}
-				
+
 				if err := json.Unmarshal(bodyBytes, &req); err != nil {
 					errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 					data, statusCode := MarshalJSONErrorResponse(errorResp)
 					return data, statusCode
 				}
-				
+
 				if req.TargetUserID == "" {
 					errorResp := CreateValidationErrorResponse("target_user_id", "", "target_user_id field is required")
 					data, statusCode := MarshalJSONErrorResponse(errorResp)
 					return data, statusCode
 				}
-				
+
 				// Check if users exist
 				sourceUser := state.GetUserByID(userID)
 				targetUser := state.GetUserByID(req.TargetUserID)
@@ -1480,15 +1517,15 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if targetUser == nil {
 					return formatResourceNotFoundError("user", "id", req.TargetUserID), http.StatusOK
 				}
-				
+
 				if state.BlockUser(userID, req.TargetUserID) {
 					response := map[string]interface{}{
 						"data": map[string]interface{}{
 							"blocking": true,
 						},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 				// Already blocked - return success (idempotent)
 				response := map[string]interface{}{
@@ -1513,7 +1550,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if errorData, statusCode := validateUserIDMatchesAuthenticatedUser(userID, authenticatedUserID); errorData != nil {
 					return errorData, statusCode
 				}
-				
+
 				var req struct {
 					TargetUserID string `json:"target_user_id"`
 				}
@@ -1523,25 +1560,25 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					data, statusCode := MarshalJSONErrorResponse(errorResp)
 					return data, statusCode
 				}
-				
+
 				if len(bodyBytes) == 0 {
 					errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 					data, statusCode := MarshalJSONErrorResponse(errorResp)
 					return data, statusCode
 				}
-				
+
 				if err := json.Unmarshal(bodyBytes, &req); err != nil {
 					errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 					data, statusCode := MarshalJSONErrorResponse(errorResp)
 					return data, statusCode
 				}
-				
+
 				if req.TargetUserID == "" {
 					errorResp := CreateValidationErrorResponse("target_user_id", "", "target_user_id field is required")
 					data, statusCode := MarshalJSONErrorResponse(errorResp)
 					return data, statusCode
 				}
-				
+
 				// Check if users exist
 				sourceUser := state.GetUserByID(userID)
 				targetUser := state.GetUserByID(req.TargetUserID)
@@ -1551,15 +1588,15 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if targetUser == nil {
 					return formatResourceNotFoundError("user", "id", req.TargetUserID), http.StatusOK
 				}
-				
+
 				if state.MuteUser(userID, req.TargetUserID) {
 					response := map[string]interface{}{
 						"data": map[string]interface{}{
 							"muting": true,
 						},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 				// Already muted - return success (idempotent)
 				response := map[string]interface{}{
@@ -1586,7 +1623,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if errorData, statusCode := validateUserIDMatchesAuthenticatedUser(userID, authenticatedUserID); errorData != nil {
 					return errorData, statusCode
 				}
-				
+
 				var req struct {
 					TargetUserID string `json:"target_user_id"`
 				}
@@ -1606,12 +1643,12 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 						if state.FollowUser(userID, req.TargetUserID) {
 							response := map[string]interface{}{
 								"data": map[string]interface{}{
-									"following":     true,
+									"following":      true,
 									"pending_follow": false,
 								},
 							}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+							data, statusCode := MarshalJSONResponse(response)
+							return data, statusCode
 						} else {
 							// FollowUser failed for other reasons (e.g., already following, same user)
 							return formatResourceNotFoundError("user", "id", req.TargetUserID), http.StatusOK
@@ -1639,13 +1676,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				limit = parsed
 			}
 		}
-		
+
 		// Search through all users
 		allUsers := state.GetAllUsers()
 		var results []*User
 		seenIDs := make(map[string]bool) // Track user IDs to prevent duplicates
 		queryLower := strings.ToLower(query)
-		
+
 	userLoop:
 		for _, user := range allUsers {
 			// Check for context cancellation in long-running loops
@@ -1655,26 +1692,26 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				break userLoop
 			default:
 			}
-			
+
 			if len(results) >= limit {
 				break
 			}
-			
+
 			// Skip if we've already added this user
 			if seenIDs[user.ID] {
 				continue
 			}
-			
+
 			// Search in name, username, description
 			if query == "" ||
-			   strings.Contains(strings.ToLower(user.Name), queryLower) ||
-			   strings.Contains(strings.ToLower(user.Username), queryLower) ||
-			   strings.Contains(strings.ToLower(user.Description), queryLower) {
+				strings.Contains(strings.ToLower(user.Name), queryLower) ||
+				strings.Contains(strings.ToLower(user.Username), queryLower) ||
+				strings.Contains(strings.ToLower(user.Description), queryLower) {
 				results = append(results, user)
 				seenIDs[user.ID] = true
 			}
 		}
-		
+
 		return formatStateDataToOpenAPI(results, op, spec, queryParams, state), http.StatusOK
 	}
 
@@ -1823,18 +1860,18 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				// No tweets by this user, return empty result
 				return formatStateDataToOpenAPI([]*Tweet{}, op, spec, queryParams, state), http.StatusOK
 			}
-			
+
 			userTweetIDs := make(map[string]bool)
 			for _, tweet := range userTweets {
 				userTweetIDs[tweet.ID] = true
 			}
-			
+
 			// Find all tweets that retweet any of the authenticated user's tweets
 			// Check ReferencedTweets to find retweet tweet objects
 			allTweets := state.GetAllTweets()
 			retweetTweets := make([]*Tweet, 0)
 			processedRetweets := make(map[string]bool) // Track to avoid duplicates
-			
+
 		tweetLoop:
 			for i, tweet := range allTweets {
 				// Check context cancellation every 100 iterations
@@ -1846,7 +1883,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					default:
 					}
 				}
-				
+
 				// Check if this tweet is a retweet of any of the user's tweets
 				for _, ref := range tweet.ReferencedTweets {
 					if ref.Type == "retweeted" && userTweetIDs[ref.ID] {
@@ -1858,7 +1895,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					}
 				}
 			}
-			
+
 			// Also check RetweetedBy relationships as a fallback
 			// Get fresh tweets from state to ensure we have the latest RetweetedBy data
 			for _, tweetID := range user.Tweets {
@@ -1878,7 +1915,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 								break
 							}
 						}
-						
+
 						// If no retweet tweet object exists, create one on the fly
 						if !foundRetweetTweet {
 							retweeter := state.GetUserByID(retweeterID)
@@ -1886,10 +1923,10 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 								// Create a retweet tweet object on the fly
 								retweetID := state.generateID()
 								retweet := &Tweet{
-									ID:        retweetID,
-									Text:      originalTweet.Text, // Retweets typically have same text
-									AuthorID:  retweeterID,
-									CreatedAt: originalTweet.CreatedAt.Add(time.Duration(rand.Intn(30)) * time.Hour), // Sometime after original
+									ID:                  retweetID,
+									Text:                originalTweet.Text, // Retweets typically have same text
+									AuthorID:            retweeterID,
+									CreatedAt:           originalTweet.CreatedAt.Add(time.Duration(rand.Intn(30)) * time.Hour), // Sometime after original
 									EditHistoryTweetIDs: []string{retweetID},
 									ReferencedTweets: []ReferencedTweet{
 										{
@@ -1903,13 +1940,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 										ReplyCount:   0,
 										QuoteCount:   0,
 									},
-									Source: "Twitter Web App",
-									Lang:   originalTweet.Lang,
-									LikedBy:         make([]string, 0),
-									RetweetedBy:     make([]string, 0),
-									Replies:         make([]string, 0),
-									Quotes:          make([]string, 0),
-									Media:           make([]string, 0),
+									Source:      "Twitter Web App",
+									Lang:        originalTweet.Lang,
+									LikedBy:     make([]string, 0),
+									RetweetedBy: make([]string, 0),
+									Replies:     make([]string, 0),
+									Quotes:      make([]string, 0),
+									Media:       make([]string, 0),
 								}
 								if !processedRetweets[retweetID] {
 									retweetTweets = append(retweetTweets, retweet)
@@ -1920,12 +1957,12 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					}
 				}
 			}
-			
+
 			// Sort by created_at descending (newest first)
 			sort.Slice(retweetTweets, func(i, j int) bool {
 				return retweetTweets[i].CreatedAt.After(retweetTweets[j].CreatedAt)
 			})
-			
+
 			// Apply pagination
 			limit := 10
 			if limitStr := r.URL.Query().Get("max_results"); limitStr != "" {
@@ -1936,7 +1973,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			if len(retweetTweets) > limit {
 				retweetTweets = retweetTweets[:limit]
 			}
-			
+
 			return formatStateDataToOpenAPI(retweetTweets, op, spec, queryParams, state), http.StatusOK
 		}
 		// If no authenticated user, return empty result
@@ -1952,40 +1989,40 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if err := ValidateSnowflakeID(userID); err != nil {
 					errorResp := FormatSingleValidationError(err)
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
-				}
-				return data, http.StatusBadRequest
+					return data, http.StatusBadRequest
 				}
 			} else {
 				// It's a username, validate format
 				if err := ValidateUsername(userID); err != nil {
 					errorResp := FormatSingleValidationError(err)
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
-				}
-				return data, http.StatusBadRequest
+					return data, http.StatusBadRequest
 				}
 			}
 			user := state.GetUserByID(userID)
@@ -2004,7 +2041,6 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		}
 	}
 
-
 	// POST /2/tweets
 	if method == "POST" && path == "/2/tweets" {
 		// Body validation already happened above, so body should be restored
@@ -2016,7 +2052,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		// Parse full request body to check for mutually exclusive parameters
 		var reqBody map[string]interface{}
 		if err := json.Unmarshal(bodyBytes, &reqBody); err != nil {
@@ -2024,13 +2060,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		// Check for mutually exclusive parameters: poll, quote_tweet_id, direct_message_deep_link, media, card_uri
 		// You can only provide one of these
 		exclusiveParams := []string{"poll", "quote_tweet_id", "direct_message_deep_link", "media", "card_uri"}
 		var providedParams []string
 		paramValues := make(map[string]interface{})
-		
+
 		for _, param := range exclusiveParams {
 			if val, exists := reqBody[param]; exists && val != nil {
 				// Check if value is non-empty
@@ -2049,7 +2085,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 			}
 		}
-		
+
 		// If multiple mutually exclusive parameters are provided, return error
 		if len(providedParams) > 1 {
 			errorResp := CreateMutuallyExclusiveErrorResponse(
@@ -2059,48 +2095,66 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		// Validate referenced resources exist (media IDs, user IDs, tweet IDs, etc.)
 		// These are business logic validations not covered by OpenAPI spec
-		
-		// Validate media.media_ids if provided
+
+		// Validate media.media_ids if provided and retain them so the
+		// relationship can be persisted after tweet creation.
+		mediaIDs := make([]string, 0)
+
 		if mediaVal, exists := reqBody["media"]; exists {
 			if mediaMap, ok := mediaVal.(map[string]interface{}); ok {
 				if mediaIDsVal, hasMediaIDs := mediaMap["media_ids"]; hasMediaIDs {
-					if mediaIDs, ok := mediaIDsVal.([]interface{}); ok {
+					if rawMediaIDs, ok := mediaIDsVal.([]interface{}); ok {
 						var invalidMediaIDs []string
-						for _, idVal := range mediaIDs {
-							if mediaID, ok := idValueToString(idVal); ok {
-								if state.GetMedia(mediaID) == nil {
-									invalidMediaIDs = append(invalidMediaIDs, mediaID)
-								}
+
+						for _, idVal := range rawMediaIDs {
+							mediaID, ok := idValueToString(idVal)
+							if !ok {
+								continue
+							}
+
+							mediaIDs = append(mediaIDs, mediaID)
+
+							if state.GetMedia(mediaID) == nil {
+								invalidMediaIDs = append(
+									invalidMediaIDs,
+									mediaID,
+								)
 							}
 						}
+
 						if len(invalidMediaIDs) > 0 {
-							// Format error matching real API format
 							errorResp := CreateMutuallyExclusiveErrorResponse(
 								map[string]interface{}{
 									"media.media_ids": invalidMediaIDs,
 								},
 								"Your media IDs are invalid.",
 							)
+
 							data, statusCode := MarshalJSONErrorResponse(errorResp)
 							return data, statusCode
 						}
 					}
 				}
-				
+
 				// Validate tagged_user_ids if provided
 				if taggedUsersVal, hasTaggedUsers := mediaMap["tagged_user_ids"]; hasTaggedUsers {
 					if taggedUsers, ok := taggedUsersVal.([]interface{}); ok {
 						var invalidUserIDs []string
+
 						for _, idVal := range taggedUsers {
 							if userID, ok := idValueToString(idVal); ok {
 								if state.GetUserByID(userID) == nil {
-									invalidUserIDs = append(invalidUserIDs, userID)
+									invalidUserIDs = append(
+										invalidUserIDs,
+										userID,
+									)
 								}
 							}
 						}
+
 						if len(invalidUserIDs) > 0 {
 							errorResp := CreateMutuallyExclusiveErrorResponse(
 								map[string]interface{}{
@@ -2108,6 +2162,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 								},
 								"Your tagged user IDs are invalid.",
 							)
+
 							data, statusCode := MarshalJSONErrorResponse(errorResp)
 							return data, statusCode
 						}
@@ -2115,7 +2170,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 			}
 		}
-		
+
 		// Validate quote_tweet_id if provided
 		if quoteTweetIDVal, exists := reqBody["quote_tweet_id"]; exists {
 			if quoteTweetID, ok := idValueToString(quoteTweetIDVal); ok {
@@ -2131,7 +2186,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 			}
 		}
-		
+
 		// Validate reply.in_reply_to_tweet_id if provided
 		if replyVal, exists := reqBody["reply"]; exists {
 			if replyMap, ok := replyVal.(map[string]interface{}); ok {
@@ -2149,7 +2204,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 						}
 					}
 				}
-				
+
 				// Validate reply.exclude_reply_user_ids if provided
 				if excludeUsersVal, hasExclude := replyMap["exclude_reply_user_ids"]; hasExclude {
 					if excludeUsers, ok := excludeUsersVal.([]interface{}); ok {
@@ -2175,41 +2230,91 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 			}
 		}
-		
+
 		// Extract text field
 		text, _ := reqBody["text"].(string)
-		
+
 		// Check if text field is present and non-empty
 		if text == "" {
 			errorResp := CreateValidationErrorResponse("text", "", "text field is required")
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		// Validate tweet text length
 		if len(text) > MaxTweetLength {
 			errorResp := CreateValidationErrorResponse("text", text, fmt.Sprintf("text field exceeds maximum length of %d characters", MaxTweetLength))
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		// Sanitize input before creating tweet
 		sanitizedText := SanitizeInput(text)
-		
-		// Valid request - create tweet
+
+		// Valid request - create tweet.
+		//
+		// Playground testing extension:
+		// X-Playground-User-ID allows local tests to choose which mock user
+		// is acting as the authenticated X user.
+		//
+		// This is intentionally a non-X header and must never be relied on by
+		// application code. Without it, Playground keeps its original behavior
+		// and uses the default user.
 		user := state.GetDefaultUser()
+
+		if mockUserID := strings.TrimSpace(r.Header.Get("X-Playground-User-ID")); mockUserID != "" {
+			user = state.GetUserByID(mockUserID)
+
+			if user == nil {
+				errorResp := CreateValidationErrorResponse(
+					"authorization",
+					mockUserID,
+					"mock user specified by X-Playground-User-ID does not exist",
+				)
+				data, statusCode := MarshalJSONErrorResponse(errorResp)
+				return data, statusCode
+			}
+		}
+
 		if user == nil {
-			errorResp := CreateValidationErrorResponse("authorization", "", "no authenticated user found")
+			errorResp := CreateValidationErrorResponse(
+				"authorization",
+				"",
+				"no authenticated user found",
+			)
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
 		tweet := state.CreateTweet(sanitizedText, user.ID)
 		if tweet == nil {
-			errorResp := CreateValidationErrorResponse("server", "", "failed to create tweet")
+			errorResp := CreateValidationErrorResponse(
+				"server",
+				"",
+				"failed to create tweet",
+			)
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		return formatStateDataToOpenAPI(tweet, op, spec, queryParams, state), http.StatusCreated
+
+		if len(mediaIDs) > 0 {
+			if !state.AttachMediaToTweet(tweet.ID, mediaIDs) {
+				errorResp := CreateValidationErrorResponse(
+					"media.media_ids",
+					"",
+					"failed to attach media to tweet",
+				)
+				data, statusCode := MarshalJSONErrorResponse(errorResp)
+				return data, statusCode
+			}
+		}
+
+		return formatStateDataToOpenAPI(
+			tweet,
+			op,
+			spec,
+			queryParams,
+			state,
+		), http.StatusCreated
 	}
 
 	// GET /2/tweets/search/recent (must be before /2/tweets/{id} to avoid path collision)
@@ -2221,7 +2326,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				limit = parsed
 			}
 		}
-		
+
 		// Parse time filtering parameters
 		sinceID := r.URL.Query().Get("since_id")
 		untilID := r.URL.Query().Get("until_id")
@@ -2236,7 +2341,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				endTime = &t
 			}
 		}
-		
+
 		tweets := state.SearchTweets(r.Context(), query, limit, sinceID, untilID, startTime, endTime)
 		// Always return a response, even if empty (prevents falling through to examples)
 		return formatSearchTweetsResponse(tweets, queryParams, state, spec, limit), http.StatusOK
@@ -2251,7 +2356,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				limit = parsed // search/all allows up to 500 results
 			}
 		}
-		
+
 		// Parse time filtering parameters
 		sinceID := r.URL.Query().Get("since_id")
 		untilID := r.URL.Query().Get("until_id")
@@ -2266,7 +2371,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				endTime = &t
 			}
 		}
-		
+
 		// search/all searches all tweets (no 7-day restriction like search/recent)
 		// In playground, we search all seeded tweets
 		tweets := state.SearchTweets(r.Context(), query, limit, sinceID, untilID, startTime, endTime)
@@ -2341,7 +2446,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				break
 			}
 		}
-		
+
 		// Handle edge case where startTime == endTime (single hour bucket)
 		if startTime.Equal(endTime) {
 			bucketCount := 0
@@ -2351,14 +2456,14 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 			}
 			totalCount += bucketCount
-			
+
 			buckets = append(buckets, map[string]interface{}{
 				"start":       startTime.Format(time.RFC3339),
 				"end":         endTime.Format(time.RFC3339),
 				"tweet_count": bucketCount,
 			})
 		}
-		
+
 		response := map[string]interface{}{
 			"data": buckets,
 			"meta": map[string]interface{}{
@@ -2375,7 +2480,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		// Parse start_time and end_time (required for counts/all)
 		var startTime, endTime time.Time
 		var hasStartTime, hasEndTime bool
-		
+
 		if startTimeStr := r.URL.Query().Get("start_time"); startTimeStr != "" {
 			if t, err := time.Parse(time.RFC3339, startTimeStr); err == nil {
 				startTime = t
@@ -2388,7 +2493,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				hasEndTime = true
 			}
 		}
-		
+
 		// If no times provided, use defaults (last 30 days)
 		if !hasStartTime {
 			endTime = time.Now()
@@ -2396,16 +2501,16 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		} else if !hasEndTime {
 			endTime = time.Now()
 		}
-		
+
 		// Round start_time down to the hour and end_time up to the hour
 		startTime = time.Date(startTime.Year(), startTime.Month(), startTime.Day(), startTime.Hour(), 0, 0, 0, startTime.Location())
 		endTime = time.Date(endTime.Year(), endTime.Month(), endTime.Day(), endTime.Hour(), 0, 0, 0, endTime.Location())
-		
+
 		// Get all tweets matching the query
 		allTweets := state.GetAllTweets()
 		queryLower := strings.ToLower(query)
 		matchingTweets := make([]*Tweet, 0)
-		
+
 		for _, tweet := range allTweets {
 			if query == "" || strings.Contains(strings.ToLower(tweet.Text), queryLower) {
 				if tweet.CreatedAt.After(startTime) && tweet.CreatedAt.Before(endTime.Add(time.Hour)) {
@@ -2413,18 +2518,18 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 			}
 		}
-		
+
 		// Create hourly buckets
 		buckets := make([]map[string]interface{}, 0)
 		current := startTime
 		totalCount := 0
-		
+
 		for current.Before(endTime) {
 			bucketEnd := current.Add(time.Hour)
 			if bucketEnd.After(endTime) {
 				bucketEnd = endTime
 			}
-			
+
 			// Count tweets in this hour bucket
 			bucketCount := 0
 			for _, tweet := range matchingTweets {
@@ -2433,20 +2538,20 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 			}
 			totalCount += bucketCount
-			
+
 			buckets = append(buckets, map[string]interface{}{
 				"start":       current.Format(time.RFC3339),
 				"end":         bucketEnd.Format(time.RFC3339),
 				"tweet_count": bucketCount,
 			})
-			
+
 			current = bucketEnd
 			// Break if we've reached endTime to avoid infinite loop
 			if !current.Before(endTime) {
 				break
 			}
 		}
-		
+
 		// Handle edge case where startTime == endTime (single hour bucket)
 		if startTime.Equal(endTime) {
 			bucketCount := 0
@@ -2456,14 +2561,14 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 			}
 			totalCount += bucketCount
-			
+
 			buckets = append(buckets, map[string]interface{}{
 				"start":       startTime.Format(time.RFC3339),
 				"end":         endTime.Format(time.RFC3339),
 				"tweet_count": bucketCount,
 			})
 		}
-		
+
 		response := map[string]interface{}{
 			"data": buckets,
 			"meta": map[string]interface{}{
@@ -2544,16 +2649,16 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 	// GET /2/tweets/{id}
 	if method == "GET" && strings.HasPrefix(path, "/2/tweets/") {
 		// Exclude search, streaming, counts, analytics, and relationship endpoints
-		if strings.HasPrefix(path, "/2/tweets/search") || 
-		   strings.Contains(path, "/stream") ||
-		   strings.Contains(path, "/sample") ||
-		   strings.Contains(path, "/firehose") ||
-		   strings.Contains(path, "/counts") ||
-		   strings.Contains(path, "/analytics") ||
-		   strings.HasSuffix(path, "/liking_users") ||
-		   strings.HasSuffix(path, "/retweeted_by") ||
-		   strings.HasSuffix(path, "/quote_tweets") ||
-		   strings.HasSuffix(path, "/retweets") {
+		if strings.HasPrefix(path, "/2/tweets/search") ||
+			strings.Contains(path, "/stream") ||
+			strings.Contains(path, "/sample") ||
+			strings.Contains(path, "/firehose") ||
+			strings.Contains(path, "/counts") ||
+			strings.Contains(path, "/analytics") ||
+			strings.HasSuffix(path, "/liking_users") ||
+			strings.HasSuffix(path, "/retweeted_by") ||
+			strings.HasSuffix(path, "/quote_tweets") ||
+			strings.HasSuffix(path, "/retweets") {
 			// Already handled above or by relationship handlers, skip
 		} else {
 			tweetID := extractPathParam(path, "/2/tweets/")
@@ -2562,20 +2667,20 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if err := ValidateSnowflakeID(tweetID); err != nil {
 					errorResp := FormatSingleValidationError(err)
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
-				}
-				return data, http.StatusBadRequest
+					return data, http.StatusBadRequest
 				}
 				tweet := state.GetTweet(tweetID)
 				if tweet != nil {
@@ -2598,13 +2703,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				data, statusCode := MarshalJSONErrorResponse(errorResp)
 				return data, statusCode
 			}
-			
+
 			// Get the tweet first to check ownership
 			tweet := state.GetTweet(tweetID)
 			if tweet == nil {
 				return formatResourceNotFoundError("tweet", "id", tweetID), http.StatusNotFound
 			}
-			
+
 			// Check if authenticated user is the author
 			authenticatedUserID := getAuthenticatedUserID(r, state)
 			if tweet.AuthorID != authenticatedUserID {
@@ -2629,7 +2734,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusForbidden
 			}
-			
+
 			// User is the author, proceed with deletion
 			if state.DeleteTweet(tweetID) {
 				response := map[string]interface{}{
@@ -2643,7 +2748,6 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		}
 	}
 
-
 	// POST /2/media/upload/initialize
 	if method == "POST" && path == "/2/media/upload/initialize" {
 		var req struct {
@@ -2653,42 +2757,197 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-			// Media keys must match pattern: ^([0-9]+)_([0-9]+)$ (e.g., "123_456")
-			// Use timestamp components to create valid format
+			// Media keys must match ^([0-9]+)_([0-9]+)$.
 			now := time.Now().Unix()
-			mediaKey := fmt.Sprintf("%d_%d", now/1000, now%1000)
+			mediaKey := fmt.Sprintf(
+				"%d_%d",
+				now/1000,
+				now%1000,
+			)
+
 			media := state.CreateMedia(mediaKey, 3600)
-			return formatStateDataToOpenAPI(media, op, spec, queryParams, state), http.StatusOK
+
+			if !state.ConfigureMediaUpload(
+				media.ID,
+				req.MediaType,
+				req.TotalBytes,
+			) {
+				errorResp := CreateValidationErrorResponse(
+					"media",
+					media.ID,
+					"failed to initialize media upload state",
+				)
+
+				data, statusCode := MarshalJSONErrorResponse(errorResp)
+				return data, statusCode
+			}
+
+			return formatStateDataToOpenAPI(
+				media,
+				op,
+				spec,
+				queryParams,
+				state,
+			), http.StatusOK
 		}
 	}
 
 	// POST /2/media/upload/{id}/append
-	if method == "POST" && strings.Contains(path, "/2/media/upload/") && strings.Contains(path, "/append") {
+	if method == "POST" &&
+		strings.Contains(path, "/2/media/upload/") &&
+		strings.Contains(path, "/append") {
+
 		mediaID := extractMediaIDFromPath(path)
-		if mediaID != "" {
-			media := state.GetMedia(mediaID)
-			if media != nil {
-				// Just accept the append - return empty response for 204 No Content
-				return []byte(""), http.StatusNoContent
-			}
+		if mediaID == "" {
+			return formatResourceNotFoundError(
+				"media",
+				"id",
+				mediaID,
+			), http.StatusNotFound
 		}
+
+		if state.GetMedia(mediaID) == nil {
+			return formatResourceNotFoundError(
+				"media",
+				"id",
+				mediaID,
+			), http.StatusNotFound
+		}
+
+		if err := r.ParseMultipartForm(MaxRequestSize); err != nil {
+			errorResp := CreateValidationErrorResponse(
+				"requestBody",
+				"",
+				fmt.Sprintf(
+					"invalid multipart/form-data: %v",
+					err,
+				),
+			)
+
+			data, statusCode := MarshalJSONErrorResponse(errorResp)
+			return data, statusCode
+		}
+
+		if r.MultipartForm != nil {
+			defer r.MultipartForm.RemoveAll()
+		}
+
+		file, _, err := r.FormFile("media")
+		if err != nil {
+			errorResp := CreateValidationErrorResponse(
+				"media",
+				"",
+				"media file is required",
+			)
+
+			data, statusCode := MarshalJSONErrorResponse(errorResp)
+			return data, statusCode
+		}
+		defer file.Close()
+
+		segmentIndexRaw := r.FormValue("segment_index")
+		segmentIndex, err := strconv.Atoi(segmentIndexRaw)
+		if err != nil || segmentIndex < 0 {
+			errorResp := CreateValidationErrorResponse(
+				"segment_index",
+				segmentIndexRaw,
+				"segment_index must be a non-negative integer",
+			)
+
+			data, statusCode := MarshalJSONErrorResponse(errorResp)
+			return data, statusCode
+		}
+
+		payload, err := io.ReadAll(file)
+		if err != nil {
+			errorResp := CreateValidationErrorResponse(
+				"media",
+				"",
+				fmt.Sprintf(
+					"failed to read uploaded media: %v",
+					err,
+				),
+			)
+
+			data, statusCode := MarshalJSONErrorResponse(errorResp)
+			return data, statusCode
+		}
+
+		if !state.AppendMediaSegment(
+			mediaID,
+			segmentIndex,
+			payload,
+		) {
+			errorResp := CreateValidationErrorResponse(
+				"media",
+				mediaID,
+				"failed to store media segment",
+			)
+
+			data, statusCode := MarshalJSONErrorResponse(errorResp)
+			return data, statusCode
+		}
+
+		return []byte(""), http.StatusNoContent
 	}
 
 	// POST /2/media/upload/{id}/finalize
-	if method == "POST" && strings.Contains(path, "/2/media/upload/") && strings.Contains(path, "/finalize") {
+	if method == "POST" &&
+		strings.Contains(path, "/2/media/upload/") &&
+		strings.Contains(path, "/finalize") {
+
 		mediaID := extractMediaIDFromPath(path)
-		if mediaID != "" {
-			media := state.GetMedia(mediaID)
-			if media != nil {
-				processingInfo := &ProcessingInfo{
-					State:           "processing",
-					CheckAfterSecs:  1,
-					ProgressPercent: 50,
-				}
-				state.UpdateMediaState(mediaID, "processing", processingInfo)
-				return formatStateDataToOpenAPI(media, op, spec, queryParams, state), http.StatusOK
-			}
+		if mediaID == "" {
+			return formatResourceNotFoundError(
+				"media",
+				"id",
+				mediaID,
+			), http.StatusNotFound
 		}
+
+		media := state.GetMedia(mediaID)
+		if media == nil {
+			return formatResourceNotFoundError(
+				"media",
+				"id",
+				mediaID,
+			), http.StatusNotFound
+		}
+
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+
+		publicURL := fmt.Sprintf(
+			"%s://%s/2/media/content/%s",
+			scheme,
+			r.Host,
+			media.MediaKey,
+		)
+
+		finalizedMedia, err := state.FinalizeMediaUpload(
+			mediaID,
+			publicURL,
+		)
+		if err != nil {
+			errorResp := CreateValidationErrorResponse(
+				"media",
+				mediaID,
+				err.Error(),
+			)
+
+			data, statusCode := MarshalJSONErrorResponse(errorResp)
+			return data, statusCode
+		}
+
+		return formatStateDataToOpenAPI(
+			finalizedMedia,
+			op,
+			spec,
+			queryParams,
+			state,
+		), http.StatusOK
 	}
 
 	// GET /2/media/upload?command=STATUS&media_id={id}
@@ -2717,9 +2976,9 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 							"message": "BadRequest: Not found",
 						},
 					},
-					"title":   "Invalid Request",
-					"detail":  "One or more parameters to your request was invalid.",
-					"type":    "https://api.twitter.com/2/problems/invalid-request",
+					"title":  "Invalid Request",
+					"detail": "One or more parameters to your request was invalid.",
+					"type":   "https://api.twitter.com/2/problems/invalid-request",
 				}
 				data, _ := json.Marshal(errorResponse)
 				return data, http.StatusBadRequest
@@ -2761,53 +3020,53 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		if len(bodyBytes) == 0 {
 			errorResp := CreateValidationErrorResponse("name", "", "request body is required")
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		if err := json.Unmarshal(bodyBytes, &req); err != nil {
 			errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		if req.Name == "" {
 			errorResp := CreateValidationErrorResponse("name", "", "name field is required")
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		// Validate list name length
 		if len(req.Name) > MaxListNameLength {
 			errorResp := CreateValidationErrorResponse("name", req.Name, fmt.Sprintf("name field exceeds maximum length of %d characters", MaxListNameLength))
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		// Validate list description length if provided
 		if req.Description != "" && len(req.Description) > MaxListDescriptionLength {
 			errorResp := CreateValidationErrorResponse("description", req.Description, fmt.Sprintf("description field exceeds maximum length of %d characters", MaxListDescriptionLength))
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		// Get user ID first (releases read lock before CreateList tries to acquire write lock)
 		user := state.GetDefaultUser()
 		if user == nil {
 			return formatResourceNotFoundError("user", "id", "0"), http.StatusOK
 		}
 		ownerID := user.ID // Get ID while read lock is held, then lock is released
-		
+
 		// Sanitize input
 		sanitizedName := SanitizeInput(req.Name)
 		sanitizedDescription := SanitizeInput(req.Description)
-		
+
 		// Now create list (write lock can be acquired)
 		list := state.CreateList(sanitizedName, sanitizedDescription, ownerID, req.Private)
-		
+
 		// Format list with field filtering
 		listMap := formatList(list)
 		// Always apply field filtering - if no fields specified, returns only defaults (id, name)
@@ -2865,7 +3124,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if len(bodyBytes) == 0 {
 				errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -2884,7 +3143,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if err := json.Unmarshal(bodyBytes, &req); err != nil {
 				errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 				data, jsonErr := json.Marshal(errorResp)
@@ -2903,21 +3162,21 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			// Validate list name length if provided
 			if req.Name != "" && len(req.Name) > MaxListNameLength {
 				errorResp := CreateValidationErrorResponse("name", req.Name, fmt.Sprintf("name field exceeds maximum length of %d characters", MaxListNameLength))
 				data, statusCode := MarshalJSONErrorResponse(errorResp)
 				return data, statusCode
 			}
-			
+
 			// Validate list description length if provided
 			if req.Description != "" && len(req.Description) > MaxListDescriptionLength {
 				errorResp := CreateValidationErrorResponse("description", req.Description, fmt.Sprintf("description field exceeds maximum length of %d characters", MaxListDescriptionLength))
 				data, statusCode := MarshalJSONErrorResponse(errorResp)
 				return data, statusCode
 			}
-			
+
 			// Check if list exists
 			list := state.GetList(listID)
 			if list == nil {
@@ -2956,7 +3215,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			// Check if authenticated user is the owner
 			authenticatedUserID := getAuthenticatedUserID(r, state)
 			if list.OwnerID != authenticatedUserID {
@@ -2981,7 +3240,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusForbidden
 			}
-			
+
 			// Sanitize input
 			sanitizedName := ""
 			if req.Name != "" {
@@ -2991,7 +3250,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			if req.Description != "" {
 				sanitizedDescription = SanitizeInput(req.Description)
 			}
-			
+
 			if state.UpdateList(listID, sanitizedName, sanitizedDescription, req.Private) {
 				updatedList := state.GetList(listID)
 				return formatStateDataToOpenAPI(updatedList, op, spec, queryParams, state), http.StatusOK
@@ -3043,7 +3302,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			if list == nil {
 				return formatResourceNotFoundError("list", "id", listID), http.StatusNotFound
 			}
-			
+
 			// Check if authenticated user is the owner
 			authenticatedUserID := getAuthenticatedUserID(r, state)
 			if list.OwnerID != authenticatedUserID {
@@ -3068,7 +3327,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusForbidden
 			}
-			
+
 			// User is the owner, proceed with deletion
 			if state.DeleteList(listID) {
 				response := map[string]interface{}{
@@ -3094,7 +3353,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if errorData, statusCode := validateUserIDMatchesAuthenticatedUser(userID, authenticatedUserID); errorData != nil {
 					return errorData, statusCode
 				}
-				
+
 				var req struct {
 					TweetID string `json:"tweet_id"`
 				}
@@ -3102,79 +3361,79 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if err != nil {
 					errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("failed to read request body: %v", err))
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				if len(bodyBytes) == 0 {
 					errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				if err := json.Unmarshal(bodyBytes, &req); err != nil {
 					errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				if req.TweetID == "" {
 					errorResp := CreateValidationErrorResponse("tweet_id", "", "tweet_id field is required")
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				// Check if tweet and user exist
 				tweet := state.GetTweet(req.TweetID)
 				user := state.GetUserByID(userID)
@@ -3184,13 +3443,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if user == nil {
 					return formatResourceNotFoundError("user", "id", userID), http.StatusOK
 				}
-				
+
 				if state.LikeTweet(userID, req.TweetID) {
 					response := map[string]interface{}{
 						"data": map[string]bool{"liked": true},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 				// Already liked - return success (idempotent)
 				response := map[string]interface{}{
@@ -3213,8 +3472,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"liked": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				} else {
 					// Check if tweet or user doesn't exist
 					tweet := state.GetTweet(tweetID)
@@ -3229,8 +3488,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"liked": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 			}
 		}
@@ -3246,7 +3505,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			if errorData, statusCode := validateUserIDMatchesAuthenticatedUser(userID, authenticatedUserID); errorData != nil {
 				return errorData, statusCode
 			}
-			
+
 			var req struct {
 				TweetID string `json:"tweet_id"`
 			}
@@ -3269,7 +3528,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if len(bodyBytes) == 0 {
 				errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -3288,7 +3547,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if err := json.Unmarshal(bodyBytes, &req); err != nil {
 				errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 				data, jsonErr := json.Marshal(errorResp)
@@ -3307,7 +3566,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if req.TweetID == "" {
 				errorResp := CreateValidationErrorResponse("tweet_id", "", "tweet_id field is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -3326,7 +3585,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			// Check if tweet and user exist
 			tweet := state.GetTweet(req.TweetID)
 			user := state.GetUserByID(userID)
@@ -3336,7 +3595,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			if user == nil {
 				return formatResourceNotFoundError("user", "id", userID), http.StatusOK
 			}
-			
+
 			if state.Retweet(userID, req.TweetID) {
 				response := map[string]interface{}{
 					"data": map[string]bool{"retweeted": true},
@@ -3348,8 +3607,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			response := map[string]interface{}{
 				"data": map[string]bool{"retweeted": true},
 			}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+			data, statusCode := MarshalJSONResponse(response)
+			return data, statusCode
 		}
 	}
 
@@ -3364,8 +3623,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"retweeted": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				} else {
 					// Check if tweet or user doesn't exist
 					tweet := state.GetTweet(tweetID)
@@ -3380,8 +3639,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"retweeted": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 			}
 		}
@@ -3414,7 +3673,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if len(bodyBytes) == 0 {
 				errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -3433,7 +3692,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if err := json.Unmarshal(bodyBytes, &req); err != nil {
 				errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 				data, jsonErr := json.Marshal(errorResp)
@@ -3452,7 +3711,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if req.TargetUserID == "" {
 				errorResp := CreateValidationErrorResponse("target_user_id", "", "target_user_id field is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -3471,7 +3730,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			// Check if users exist
 			sourceUser := state.GetUserByID(userID)
 			targetUser := state.GetUserByID(req.TargetUserID)
@@ -3481,7 +3740,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			if targetUser == nil {
 				return formatResourceNotFoundError("user", "id", req.TargetUserID), http.StatusOK
 			}
-			
+
 			if state.FollowUser(userID, req.TargetUserID) {
 				response := map[string]interface{}{
 					"data": map[string]bool{"following": true},
@@ -3493,8 +3752,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			response := map[string]interface{}{
 				"data": map[string]bool{"following": true},
 			}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+			data, statusCode := MarshalJSONResponse(response)
+			return data, statusCode
 		}
 	}
 
@@ -3512,8 +3771,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 							"following": false,
 						},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				} else {
 					// Check if users exist
 					sourceUser := state.GetUserByID(userID)
@@ -3530,8 +3789,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 							"following": false,
 						},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 			}
 		}
@@ -3548,8 +3807,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"following": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				} else {
 					// Check if users exist
 					sourceUser := state.GetUserByID(userID)
@@ -3564,13 +3823,12 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"following": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 			}
 		}
 	}
-
 
 	// POST /2/users/{id}/blocks (alternative path)
 	if method == "POST" && strings.Contains(path, "/users/") && strings.HasSuffix(path, "/blocks") {
@@ -3586,79 +3844,79 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if err != nil {
 					errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("failed to read request body: %v", err))
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				if len(bodyBytes) == 0 {
 					errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				if err := json.Unmarshal(bodyBytes, &req); err != nil {
 					errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				if req.TargetUserID == "" {
 					errorResp := CreateValidationErrorResponse("target_user_id", "", "target_user_id field is required")
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				// Check if users exist
 				sourceUser := state.GetUserByID(userID)
 				targetUser := state.GetUserByID(req.TargetUserID)
@@ -3668,13 +3926,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if targetUser == nil {
 					return formatResourceNotFoundError("user", "id", req.TargetUserID), http.StatusOK
 				}
-				
+
 				if state.BlockUser(userID, req.TargetUserID) {
 					response := map[string]interface{}{
 						"data": map[string]bool{"blocking": true},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 				// Already blocked - return success (idempotent)
 				response := map[string]interface{}{
@@ -3697,8 +3955,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"blocking": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				} else {
 					// Check if users exist
 					sourceUser := state.GetUserByID(userID)
@@ -3713,13 +3971,12 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"blocking": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 			}
 		}
 	}
-
 
 	// POST /2/users/{id}/mutes (alternative path)
 	if method == "POST" && strings.Contains(path, "/users/") && strings.HasSuffix(path, "/mutes") {
@@ -3735,79 +3992,79 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if err != nil {
 					errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("failed to read request body: %v", err))
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				if len(bodyBytes) == 0 {
 					errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				if err := json.Unmarshal(bodyBytes, &req); err != nil {
 					errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				if req.TargetUserID == "" {
 					errorResp := CreateValidationErrorResponse("target_user_id", "", "target_user_id field is required")
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				// Check if users exist
 				sourceUser := state.GetUserByID(userID)
 				targetUser := state.GetUserByID(req.TargetUserID)
@@ -3817,13 +4074,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if targetUser == nil {
 					return formatResourceNotFoundError("user", "id", req.TargetUserID), http.StatusOK
 				}
-				
+
 				if state.MuteUser(userID, req.TargetUserID) {
 					response := map[string]interface{}{
 						"data": map[string]bool{"muting": true},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 				// Already muted - return success (idempotent)
 				response := map[string]interface{}{
@@ -3848,8 +4105,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 							"muting": false,
 						},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				} else {
 					// Check if users exist
 					sourceUser := state.GetUserByID(userID)
@@ -3866,8 +4123,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 							"muting": false,
 						},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 			}
 		}
@@ -3884,8 +4141,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"muting": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				} else {
 					// Check if users exist
 					sourceUser := state.GetUserByID(userID)
@@ -3900,8 +4157,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"muting": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 			}
 		}
@@ -3919,7 +4176,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if errorData, statusCode := validateUserIDMatchesAuthenticatedUser(userID, authenticatedUserID); errorData != nil {
 					return errorData, statusCode
 				}
-				
+
 				var req struct {
 					TweetID string `json:"tweet_id"`
 				}
@@ -3927,79 +4184,79 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if err != nil {
 					errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("failed to read request body: %v", err))
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				if len(bodyBytes) == 0 {
 					errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				if err := json.Unmarshal(bodyBytes, &req); err != nil {
 					errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				if req.TweetID == "" {
 					errorResp := CreateValidationErrorResponse("tweet_id", "", "tweet_id field is required")
 					data, jsonErr := json.Marshal(errorResp)
-				if jsonErr != nil {
-					log.Printf("Error marshaling error response: %v", jsonErr)
-					fallback := map[string]interface{}{
-						"errors": []map[string]interface{}{
-							{
-								"message": "Internal server error",
-								"code":    500,
+					if jsonErr != nil {
+						log.Printf("Error marshaling error response: %v", jsonErr)
+						fallback := map[string]interface{}{
+							"errors": []map[string]interface{}{
+								{
+									"message": "Internal server error",
+									"code":    500,
+								},
 							},
-						},
+						}
+						data = marshalFallbackError(fallback)
+						return data, http.StatusInternalServerError
 					}
-					data = marshalFallbackError(fallback)
-					return data, http.StatusInternalServerError
+					return data, http.StatusBadRequest
 				}
-				return data, http.StatusBadRequest
-				}
-				
+
 				// Check if tweet and user exist
 				tweet := state.GetTweet(req.TweetID)
 				user := state.GetUserByID(userID)
@@ -4009,13 +4266,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if user == nil {
 					return formatResourceNotFoundError("user", "id", userID), http.StatusOK
 				}
-				
+
 				if state.BookmarkTweet(userID, req.TweetID) {
 					response := map[string]interface{}{
 						"data": map[string]bool{"bookmarked": true},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 				// Already bookmarked - return success (idempotent)
 				response := map[string]interface{}{
@@ -4038,8 +4295,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"bookmarked": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				} else {
 					// Check if tweet or user doesn't exist
 					tweet := state.GetTweet(tweetID)
@@ -4054,8 +4311,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"bookmarked": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 			}
 		}
@@ -4074,35 +4331,35 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		if len(bodyBytes) == 0 {
 			errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		if err := json.Unmarshal(bodyBytes, &req); err != nil {
 			errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		if req.Title == "" {
 			errorResp := CreateValidationErrorResponse("title", "", "title field is required")
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		// Validate space title length
 		if len(req.Title) > MaxSpaceTitleLength {
 			errorResp := CreateValidationErrorResponse("title", req.Title, fmt.Sprintf("title field exceeds maximum length of %d characters", MaxSpaceTitleLength))
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		// Sanitize input
 		sanitizedTitle := SanitizeInput(req.Title)
-		
+
 		user := state.GetDefaultUser()
 		if user != nil {
 			var scheduledStart time.Time
@@ -4119,7 +4376,6 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			return formatStateDataToOpenAPI(space, op, spec, queryParams, state), http.StatusCreated
 		}
 	}
-
 
 	// GET /2/spaces/by/creator_ids
 	if method == "GET" && strings.HasPrefix(path, "/2/spaces/by/creator_ids") {
@@ -4140,8 +4396,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			response := map[string]interface{}{
 				"data": spacesData,
 			}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+			data, statusCode := MarshalJSONResponse(response)
+			return data, statusCode
 		}
 	}
 
@@ -4154,7 +4410,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				limit = parsed
 			}
 		}
-		
+
 		spaces := state.SearchSpaces(query, limit)
 		// Format spaces response
 		spacesData := make([]interface{}, len(spaces))
@@ -4243,7 +4499,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if len(bodyBytes) == 0 {
 				errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -4262,7 +4518,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if err := json.Unmarshal(bodyBytes, &req); err != nil {
 				errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 				data, jsonErr := json.Marshal(errorResp)
@@ -4281,7 +4537,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if state.UpdateSpace(spaceID, req.Title, req.State) {
 				space := state.GetSpace(spaceID)
 				return formatStateDataToOpenAPI(space, op, spec, queryParams, state), http.StatusOK
@@ -4318,7 +4574,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if len(bodyBytes) == 0 {
 				errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -4337,7 +4593,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if err := json.Unmarshal(bodyBytes, &req); err != nil {
 				errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 				data, jsonErr := json.Marshal(errorResp)
@@ -4356,7 +4612,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if req.UserID == "" {
 				errorResp := CreateValidationErrorResponse("user_id", "", "user_id field is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -4375,13 +4631,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			// Check if list exists
 			list := state.GetList(listID)
 			if list == nil {
 				return formatResourceNotFoundError("list", "id", listID), http.StatusNotFound
 			}
-			
+
 			// Check if authenticated user is the owner
 			authenticatedUserID := getAuthenticatedUserID(r, state)
 			if list.OwnerID != authenticatedUserID {
@@ -4406,13 +4662,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusForbidden
 			}
-			
+
 			// Check if user exists
 			user := state.GetUserByID(req.UserID)
 			if user == nil {
 				return formatResourceNotFoundError("user", "id", req.UserID), http.StatusNotFound
 			}
-			
+
 			if state.AddListMember(listID, req.UserID) {
 				response := map[string]interface{}{
 					"data": map[string]bool{"is_member": true},
@@ -4420,7 +4676,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				data, statusCode := MarshalJSONResponse(response)
 				return data, statusCode
 			}
-			
+
 			// If AddListMember returns false but list and user exist, it means they're already a member
 			// Return success anyway (idempotent operation)
 			response := map[string]interface{}{
@@ -4443,7 +4699,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if list == nil {
 					return formatResourceNotFoundError("list", "id", listID), http.StatusNotFound
 				}
-				
+
 				// Check if authenticated user is the owner
 				authenticatedUserID := getAuthenticatedUserID(r, state)
 				if list.OwnerID != authenticatedUserID {
@@ -4468,13 +4724,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					}
 					return data, http.StatusForbidden
 				}
-				
+
 				// Check if user exists
 				user := state.GetUserByID(userID)
 				if user == nil {
 					return formatResourceNotFoundError("user", "id", userID), http.StatusNotFound
 				}
-				
+
 				if state.RemoveListMember(listID, userID) {
 					response := map[string]interface{}{
 						"data": map[string]bool{"is_member": false},
@@ -4503,7 +4759,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			if errorData, statusCode := validateUserIDMatchesAuthenticatedUser(userID, authenticatedUserID); errorData != nil {
 				return errorData, statusCode
 			}
-			
+
 			var req struct {
 				ListID string `json:"list_id"`
 			}
@@ -4526,7 +4782,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if len(bodyBytes) == 0 {
 				errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -4545,7 +4801,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if err := json.Unmarshal(bodyBytes, &req); err != nil {
 				errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 				data, jsonErr := json.Marshal(errorResp)
@@ -4564,7 +4820,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if req.ListID == "" {
 				errorResp := CreateValidationErrorResponse("list_id", "", "list_id field is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -4583,19 +4839,19 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			// Check if list exists
 			list := state.GetList(req.ListID)
 			if list == nil {
 				return formatResourceNotFoundError("list", "id", req.ListID), http.StatusOK
 			}
-			
+
 			// Check if user exists
 			user := state.GetUserByID(userID)
 			if user == nil {
 				return formatResourceNotFoundError("user", "id", userID), http.StatusOK
 			}
-			
+
 			if state.FollowList(req.ListID, userID) {
 				response := map[string]interface{}{
 					"data": map[string]bool{"following": true},
@@ -4607,8 +4863,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			response := map[string]interface{}{
 				"data": map[string]bool{"following": true},
 			}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+			data, statusCode := MarshalJSONResponse(response)
+			return data, statusCode
 		}
 	}
 
@@ -4624,26 +4880,26 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if list == nil {
 					return formatResourceNotFoundError("list", "id", listID), http.StatusOK
 				}
-				
+
 				// Check if user exists
 				user := state.GetUserByID(userID)
 				if user == nil {
 					return formatResourceNotFoundError("user", "id", userID), http.StatusOK
 				}
-				
+
 				if state.UnfollowList(listID, userID) {
 					response := map[string]interface{}{
 						"data": map[string]bool{"following": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				} else {
 					// Already unfollowed - return success (idempotent)
 					response := map[string]interface{}{
 						"data": map[string]bool{"following": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 			}
 		}
@@ -4676,7 +4932,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if len(bodyBytes) == 0 {
 				errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -4695,7 +4951,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if err := json.Unmarshal(bodyBytes, &req); err != nil {
 				errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 				data, jsonErr := json.Marshal(errorResp)
@@ -4714,20 +4970,20 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			// Check if tweet exists
 			tweet := state.GetTweet(tweetID)
 			if tweet == nil {
 				return formatResourceNotFoundError("tweet", "id", tweetID), http.StatusOK
 			}
-			
+
 			if req.Hidden {
 				if state.HideReply(tweetID) {
 					response := map[string]interface{}{
 						"data": map[string]bool{"hidden": true},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 				// Already hidden - return success (idempotent)
 				response := map[string]interface{}{
@@ -4740,8 +4996,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					response := map[string]interface{}{
 						"data": map[string]bool{"hidden": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 				// Already unhidden - return success (idempotent)
 				response := map[string]interface{}{
@@ -4781,7 +5037,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			if errorData, statusCode := validateUserIDMatchesAuthenticatedUser(userID, authenticatedUserID); errorData != nil {
 				return errorData, statusCode
 			}
-			
+
 			var req struct {
 				ListID string `json:"list_id"`
 			}
@@ -4804,7 +5060,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if len(bodyBytes) == 0 {
 				errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -4823,7 +5079,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if err := json.Unmarshal(bodyBytes, &req); err != nil {
 				errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 				data, jsonErr := json.Marshal(errorResp)
@@ -4842,7 +5098,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			if req.ListID == "" {
 				errorResp := CreateValidationErrorResponse("list_id", "", "list_id field is required")
 				data, jsonErr := json.Marshal(errorResp)
@@ -4861,19 +5117,19 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			
+
 			// Check if list exists
 			list := state.GetList(req.ListID)
 			if list == nil {
 				return formatResourceNotFoundError("list", "id", req.ListID), http.StatusOK
 			}
-			
+
 			// Check if user exists
 			user := state.GetUserByID(userID)
 			if user == nil {
 				return formatResourceNotFoundError("user", "id", userID), http.StatusOK
 			}
-			
+
 			if state.PinList(req.ListID, userID) {
 				response := map[string]interface{}{
 					"data": map[string]bool{"pinned": true},
@@ -4885,8 +5141,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			response := map[string]interface{}{
 				"data": map[string]bool{"pinned": true},
 			}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+			data, statusCode := MarshalJSONResponse(response)
+			return data, statusCode
 		}
 	}
 
@@ -4902,26 +5158,26 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				if list == nil {
 					return formatResourceNotFoundError("list", "id", listID), http.StatusOK
 				}
-				
+
 				// Check if user exists
 				user := state.GetUserByID(userID)
 				if user == nil {
 					return formatResourceNotFoundError("user", "id", userID), http.StatusOK
 				}
-				
+
 				if state.UnpinList(listID, userID) {
 					response := map[string]interface{}{
 						"data": map[string]bool{"pinned": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				} else {
 					// Already unpinned - return success (idempotent)
 					response := map[string]interface{}{
 						"data": map[string]bool{"pinned": false},
 					}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+					data, statusCode := MarshalJSONResponse(response)
+					return data, statusCode
 				}
 			}
 		}
@@ -4937,7 +5193,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			for i := range requestedMediaKeys {
 				requestedMediaKeys[i] = strings.TrimSpace(requestedMediaKeys[i])
 			}
-			
+
 			// Get media objects matching the requested keys
 			var matchingMedia []*Media
 			var notFoundKeys []string
@@ -4948,12 +5204,12 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					notFoundKeys = append(notFoundKeys, key)
 				}
 			}
-			
+
 			// Build response with data
 			response := map[string]interface{}{
 				"data": matchingMedia,
 			}
-			
+
 			// Add "Not Found" errors for any media keys that don't exist
 			if len(notFoundKeys) > 0 {
 				var errors []map[string]interface{}
@@ -4970,7 +5226,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				response["errors"] = errors
 			}
-			
+
 			// Format response (formatStateDataToOpenAPI will handle the data array, but we need to preserve errors)
 			data, statusCode := MarshalJSONResponse(response)
 			return data, statusCode
@@ -4984,8 +5240,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 	// POST /2/media/metadata
 	if method == "POST" && path == "/2/media/metadata" {
 		var req struct {
-			MediaID string                 `json:"media_id"`
-			AltText string                 `json:"alt_text,omitempty"`
+			MediaID  string                 `json:"media_id"`
+			AltText  string                 `json:"alt_text,omitempty"`
 			Metadata map[string]interface{} `json:"metadata,omitempty"`
 		}
 		bodyBytes, err := io.ReadAll(r.Body)
@@ -4994,31 +5250,31 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		if len(bodyBytes) == 0 {
 			errorResp := CreateValidationErrorResponse("requestBody", "", "request body is required")
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		if err := json.Unmarshal(bodyBytes, &req); err != nil {
 			errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		if req.MediaID == "" {
 			errorResp := CreateValidationErrorResponse("media_id", "", "media_id field is required")
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
 		}
-		
+
 		// Check if media exists
 		media := state.GetMedia(req.MediaID)
 		if media == nil {
 			return formatResourceNotFoundError("media", "id", req.MediaID), http.StatusOK
 		}
-		
+
 		if state.UpdateMediaMetadata(req.MediaID, req.AltText, req.Metadata) {
 			updatedMedia := state.GetMedia(req.MediaID)
 			if updatedMedia != nil {
@@ -5032,9 +5288,9 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 	// POST /2/media/subtitles
 	if method == "POST" && path == "/2/media/subtitles" {
 		var req struct {
-			MediaID string `json:"media_id"`
+			MediaID      string `json:"media_id"`
 			LanguageCode string `json:"language_code"`
-			DisplayName string `json:"display_name"`
+			DisplayName  string `json:"display_name"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.MediaID != "" {
 			// For playground, we'll just acknowledge the subtitle was added
@@ -5045,7 +5301,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 						"media_id": req.MediaID,
 						"subtitle": map[string]interface{}{
 							"language_code": req.LanguageCode,
-							"display_name": req.DisplayName,
+							"display_name":  req.DisplayName,
 						},
 					},
 				}
@@ -5065,7 +5321,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				response := map[string]interface{}{
 					"data": map[string]interface{}{
 						"media_id": mediaID,
-						"deleted": true,
+						"deleted":  true,
 					},
 				}
 				data, statusCode := MarshalJSONResponse(response)
@@ -5080,7 +5336,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		allTweets := state.GetAllTweets()
 		totalTweets := len(allTweets)
 		var totalLikes, totalRetweets, totalReplies, totalQuotes int64
-		
+
 	analyticsLoop:
 		for i, tweet := range allTweets {
 			// Check context cancellation every 100 iterations
@@ -5097,7 +5353,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			totalReplies += int64(tweet.PublicMetrics.ReplyCount)
 			totalQuotes += int64(tweet.PublicMetrics.QuoteCount)
 		}
-		
+
 		response := map[string]interface{}{
 			"data": map[string]interface{}{
 				"total_tweets":   totalTweets,
@@ -5107,8 +5363,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				"total_quotes":   totalQuotes,
 			},
 		}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+		data, statusCode := MarshalJSONResponse(response)
+		return data, statusCode
 	}
 
 	// GET /2/usage/tweets
@@ -5121,7 +5377,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				days = d
 			}
 		}
-		
+
 		// Parse usage.fields parameter
 		usageFieldsParam := r.URL.Query().Get("usage.fields")
 		var requestedFields []string
@@ -5132,7 +5388,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				requestedFields[i] = strings.TrimSpace(f)
 			}
 		}
-		
+
 		// Determine which fields to include
 		// X API always includes default fields (cap_reset_day, project_cap, project_id, project_usage)
 		// even when usage.fields is specified, then adds requested fields on top
@@ -5144,24 +5400,24 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		// Additional fields are only included if explicitly requested
 		includeDailyClientAppUsage := contains(requestedFields, "daily_client_app_usage")
 		includeDailyProjectUsage := contains(requestedFields, "daily_project_usage")
-		
+
 		// Build response data
 		responseData := make(map[string]interface{})
-		
+
 		// Generate a realistic project ID (Snowflake ID format)
 		projectID := state.generateID()
-		
+
 		// Calculate cap_reset_day (day of month when cap resets, typically 1-28)
 		now := time.Now()
 		capResetDay := now.Day()
 		if capResetDay > 28 {
 			capResetDay = 1 // Reset to 1 if beyond 28
 		}
-		
+
 		// Generate realistic usage values
 		// Project cap is typically a large number (billions)
 		projectCap := "5000000000" // 5 billion default
-		
+
 		// Project usage should be less than cap, generate a realistic value
 		// Using seeded tweet count as a base for usage
 		allTweets := state.GetAllTweets()
@@ -5170,7 +5426,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			baseUsage = 4203 // Default minimum
 		}
 		projectUsage := strconv.Itoa(baseUsage)
-		
+
 		// Add fields based on what's requested
 		if includeCapResetDay {
 			responseData["cap_reset_day"] = capResetDay
@@ -5184,27 +5440,27 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		if includeProjectUsage {
 			responseData["project_usage"] = projectUsage
 		}
-		
+
 		// Generate daily_client_app_usage if requested
 		if includeDailyClientAppUsage {
 			// Generate 3-6 client apps with usage data
 			numApps := 3 + (len(allTweets) % 4) // 3-6 apps
 			clientApps := make([]map[string]interface{}, 0, numApps)
-			
+
 			// Base client app IDs (realistic shorter IDs)
 			baseClientAppIDs := []int{29035897, 30355442, 30388029, 31485888, 31585955, 31832838}
-			
+
 			// Generate usage for the last N days (where N = days parameter)
 			for i := 0; i < numApps; i++ {
 				clientAppID := strconv.Itoa(baseClientAppIDs[i%len(baseClientAppIDs)])
-				
+
 				// Some apps have usage, some don't (matching real API pattern)
 				hasUsage := (i % 3) != 2 // 2 out of 3 apps have usage
-				
+
 				clientApp := map[string]interface{}{
 					"client_app_id": clientAppID,
 				}
-				
+
 				if hasUsage {
 					// Generate daily usage for some days (not all days)
 					usageEntries := make([]map[string]interface{}, 0)
@@ -5213,7 +5469,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					if numDaysWithUsage > days {
 						numDaysWithUsage = days
 					}
-					
+
 					// Select specific days (sparse pattern, in chronological order)
 					dayOffsets := make([]int, 0, numDaysWithUsage)
 					for j := 0; j < numDaysWithUsage; j++ {
@@ -5224,7 +5480,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 						}
 						dayOffsets = append(dayOffsets, dayOffset)
 					}
-					
+
 					// Sort day offsets in ascending order (oldest first, matching real API)
 					for k := 0; k < len(dayOffsets)-1; k++ {
 						for l := k + 1; l < len(dayOffsets); l++ {
@@ -5233,14 +5489,14 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 							}
 						}
 					}
-					
+
 					for _, dayOffset := range dayOffsets {
 						// Generate date for dayOffset days ago, rounded to midnight UTC
 						usageDate := now.AddDate(0, 0, -dayOffset)
 						usageDate = time.Date(usageDate.Year(), usageDate.Month(), usageDate.Day(), 0, 0, 0, 0, time.UTC)
-						
+
 						// Generate usage value (varying values like real API)
-						usageValue := baseUsage/(numDaysWithUsage+1) + (numDaysWithUsage-dayOffset)*100 + (i*50) + (dayOffset*10)
+						usageValue := baseUsage/(numDaysWithUsage+1) + (numDaysWithUsage-dayOffset)*100 + (i * 50) + (dayOffset * 10)
 						if usageValue < 1 {
 							usageValue = 1
 						}
@@ -5251,25 +5507,25 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 								usageValue = 1
 							}
 						}
-						
+
 						usageEntries = append(usageEntries, map[string]interface{}{
 							"date":  usageDate.Format("2006-01-02T15:04:05.000Z"),
 							"usage": strconv.Itoa(usageValue),
 						})
 					}
-					
+
 					clientApp["usage"] = usageEntries
 					clientApp["usage_result_count"] = len(usageEntries)
 				} else {
 					clientApp["usage_result_count"] = 0
 				}
-				
+
 				clientApps = append(clientApps, clientApp)
 			}
-			
+
 			responseData["daily_client_app_usage"] = clientApps
 		}
-		
+
 		// Generate daily_project_usage if requested
 		if includeDailyProjectUsage {
 			// Generate daily usage for the project (only days with actual usage, like real API)
@@ -5279,7 +5535,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			if numDaysWithUsage > days {
 				numDaysWithUsage = days
 			}
-			
+
 			// Select specific days (sparse pattern like real API, in chronological order)
 			dayOffsets := make([]int, 0, numDaysWithUsage)
 			for j := 0; j < numDaysWithUsage; j++ {
@@ -5290,7 +5546,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				dayOffsets = append(dayOffsets, dayOffset)
 			}
-			
+
 			// Sort day offsets in ascending order (oldest first, matching real API)
 			for k := 0; k < len(dayOffsets)-1; k++ {
 				for l := k + 1; l < len(dayOffsets); l++ {
@@ -5299,13 +5555,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					}
 				}
 			}
-			
+
 			for _, dayOffset := range dayOffsets {
 				usageDate := now.AddDate(0, 0, -dayOffset)
 				usageDate = time.Date(usageDate.Year(), usageDate.Month(), usageDate.Day(), 0, 0, 0, 0, time.UTC)
-				
+
 				// Generate usage value (varying values like real API)
-				usageValue := baseUsage/(numDaysWithUsage+1) + (numDaysWithUsage-dayOffset)*100 + (dayOffset*10)
+				usageValue := baseUsage/(numDaysWithUsage+1) + (numDaysWithUsage-dayOffset)*100 + (dayOffset * 10)
 				if usageValue < 1 {
 					usageValue = 1
 				}
@@ -5316,20 +5572,20 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 						usageValue = 1
 					}
 				}
-				
+
 				usageEntries = append(usageEntries, map[string]interface{}{
 					"date":  usageDate.Format("2006-01-02T15:04:05.000Z"),
 					"usage": strconv.Itoa(usageValue),
 				})
 			}
-			
+
 			// project_id should be a string (matching real API)
 			responseData["daily_project_usage"] = map[string]interface{}{
 				"project_id": projectID,
 				"usage":      usageEntries,
 			}
 		}
-		
+
 		response := map[string]interface{}{
 			"data": responseData,
 		}
@@ -5373,8 +5629,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				"result_count": len(rulesData),
 			},
 		}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+		data, statusCode := MarshalJSONResponse(response)
+		return data, statusCode
 	}
 
 	// POST /2/tweets/search/stream/rules
@@ -5482,10 +5738,10 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			data, _ := MarshalJSONResponse(errorResp)
 			return data, http.StatusInternalServerError
 		}
-		
+
 		rules := state.GetSearchStreamRules()
 		ruleCount := len(rules)
-		
+
 		// Build response matching real API format exactly (no example/mock data)
 		// The real API only returns these specific fields, not all_project_client_apps or errors
 		response := map[string]interface{}{
@@ -5493,13 +5749,13 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				"cap_per_client_app": "2500000",
 				"cap_per_project":    "2500000",
 				"client_app_rules_count": map[string]interface{}{
-					"client_app_id": "123456", // Placeholder client app ID
+					"client_app_id": "123456",  // Placeholder client app ID
 					"rule_count":    ruleCount, // Actual count from state
 				},
 				"project_rules_count": fmt.Sprintf("%d", ruleCount), // Actual count from state as string
 			},
 		}
-		
+
 		data, statusCode := MarshalJSONResponse(response)
 		return data, statusCode
 	}
@@ -5520,7 +5776,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			var req struct {
 				TargetUserID string `json:"target_user_id"`
 			}
-			
+
 			// Parse body if provided, but don't require it
 			if len(bodyBytes) > 0 {
 				if err := json.Unmarshal(bodyBytes, &req); err != nil {
@@ -5542,11 +5798,11 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					return data, http.StatusBadRequest
 				}
 			}
-			
+
 			// For DM block, the user ID to block is in the path parameter {id}
 			// The body is optional and not used
 			targetUserID := userID
-			
+
 			// Check if users exist
 			sourceUser := state.GetUserByID("0") // Authenticated user (simplified)
 			targetUser := state.GetUserByID(targetUserID)
@@ -5556,7 +5812,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			if targetUser == nil {
 				return formatResourceNotFoundError("user", "id", targetUserID), http.StatusOK
 			}
-			
+
 			// For DM block, the user ID to block is in the path parameter {id}
 			// Block the user specified in the path
 			if state.BlockUser("0", targetUserID) { // "0" is the authenticated user (simplified)
@@ -5585,7 +5841,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			var req struct {
 				TargetUserID string `json:"target_user_id"`
 			}
-			
+
 			// Parse body if provided, but don't require it
 			if len(bodyBytes) > 0 {
 				if err := json.Unmarshal(bodyBytes, &req); err != nil {
@@ -5607,11 +5863,11 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					return data, http.StatusBadRequest
 				}
 			}
-			
+
 			// For DM unblock, the user ID to unblock is in the path parameter {id}
 			// The body is optional and not used
 			targetUserID := userID
-			
+
 			// Check if users exist
 			sourceUser := state.GetUserByID("0") // Authenticated user (simplified)
 			targetUser := state.GetUserByID(targetUserID)
@@ -5621,7 +5877,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			if targetUser == nil {
 				return formatResourceNotFoundError("user", "id", targetUserID), http.StatusOK
 			}
-			
+
 			// For DM unblock, the user ID to unblock is in the path parameter {id}
 			if state.UnblockUser("0", targetUserID) {
 				response := map[string]interface{}{
@@ -5634,8 +5890,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			response := map[string]interface{}{
 				"data": map[string]bool{"blocking": false},
 			}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+			data, statusCode := MarshalJSONResponse(response)
+			return data, statusCode
 		}
 	}
 
@@ -5676,14 +5932,14 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		endTimeStr := r.URL.Query().Get("end_time")
 		granularity := r.URL.Query().Get("granularity")
 		mediaKeysStr := r.URL.Query().Get("media_keys")
-		
+
 		// Validate required parameters
 		if startTimeStr == "" || endTimeStr == "" {
 			errorResponse := CreateValidationErrorResponse("start_time", startTimeStr, "start_time and end_time are required parameters")
 			data, statusCode := MarshalJSONErrorResponse(errorResponse)
 			return data, statusCode
 		}
-		
+
 		// Parse timestamps
 		startTime, err := time.Parse(time.RFC3339, startTimeStr)
 		if err != nil {
@@ -5691,20 +5947,20 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			data, statusCode := MarshalJSONErrorResponse(errorResponse)
 			return data, statusCode
 		}
-		
+
 		endTime, err := time.Parse(time.RFC3339, endTimeStr)
 		if err != nil {
 			errorResponse := CreateValidationErrorResponse("end_time", endTimeStr, fmt.Sprintf("Invalid end_time format: %v", err))
 			data, statusCode := MarshalJSONErrorResponse(errorResponse)
 			return data, statusCode
 		}
-		
+
 		// Default granularity to "hourly" if not specified (OpenAPI spec uses: hourly, daily, total)
 		if granularity == "" {
 			granularity = "hourly"
 		}
 		// OpenAPI spec validation will handle invalid values, so we don't need to validate here
-		
+
 		// Parse media_keys (comma-separated) and validate format
 		var requestedMediaKeys []string
 		if mediaKeysStr != "" {
@@ -5712,7 +5968,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			for i := range requestedMediaKeys {
 				requestedMediaKeys[i] = strings.TrimSpace(requestedMediaKeys[i])
 			}
-			
+
 			// Validate media_keys format: must match ^([0-9]+)_([0-9]+)$
 			mediaKeyPattern := regexp.MustCompile(`^([0-9]+)_([0-9]+)$`)
 			var invalidKeys []string
@@ -5721,7 +5977,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					invalidKeys = append(invalidKeys, key)
 				}
 			}
-			
+
 			if len(invalidKeys) > 0 {
 				// Return error matching X API format
 				errorResponse := map[string]interface{}{
@@ -5733,15 +5989,15 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 							"message": fmt.Sprintf("The `media_keys` query parameter value [%s] does not match ^([0-9]+)_([0-9]+)$", strings.Join(invalidKeys, ", ")),
 						},
 					},
-					"title":   "Invalid Request",
-					"detail":  "One or more parameters to your request was invalid.",
-					"type":    "https://api.twitter.com/2/problems/invalid-request",
+					"title":  "Invalid Request",
+					"detail": "One or more parameters to your request was invalid.",
+					"type":   "https://api.twitter.com/2/problems/invalid-request",
 				}
 				data, _ := json.Marshal(errorResponse)
 				return data, http.StatusBadRequest
 			}
 		}
-		
+
 		// Get media objects and track which keys were not found
 		var mediaToAnalyze []*Media
 		var notFoundKeys []string
@@ -5759,31 +6015,31 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			allMedia := state.GetAllMedia()
 			mediaToAnalyze = allMedia
 		}
-		
+
 		// Generate timestamped metrics based on granularity
 		var analyticsData []map[string]interface{}
 		for _, media := range mediaToAnalyze {
 			mediaAnalytics := map[string]interface{}{
 				"media_key": media.MediaKey,
 			}
-			
+
 			var timestampedMetrics []map[string]interface{}
-			
+
 			if granularity == "total" {
 				// Single timestamped metric for the entire period
 				timestampedMetrics = append(timestampedMetrics, map[string]interface{}{
 					"timestamp": startTime.Format(time.RFC3339),
 					"metrics": map[string]interface{}{
-						"video_views":           100 + len(media.MediaKey)%50,
-						"playback_start":        80 + len(media.MediaKey)%30,
-						"playback25":            60 + len(media.MediaKey)%25,
-						"playback50":            40 + len(media.MediaKey)%20,
-						"playback75":            25 + len(media.MediaKey)%15,
-						"playback_complete":     15 + len(media.MediaKey)%10,
-						"play_from_tap":         20 + len(media.MediaKey)%10,
-						"cta_url_clicks":        10 + len(media.MediaKey)%5,
-						"cta_watch_clicks":      5 + len(media.MediaKey)%3,
-						"watch_time_ms":         50000 + len(media.MediaKey)*1000,
+						"video_views":       100 + len(media.MediaKey)%50,
+						"playback_start":    80 + len(media.MediaKey)%30,
+						"playback25":        60 + len(media.MediaKey)%25,
+						"playback50":        40 + len(media.MediaKey)%20,
+						"playback75":        25 + len(media.MediaKey)%15,
+						"playback_complete": 15 + len(media.MediaKey)%10,
+						"play_from_tap":     20 + len(media.MediaKey)%10,
+						"cta_url_clicks":    10 + len(media.MediaKey)%5,
+						"cta_watch_clicks":  5 + len(media.MediaKey)%3,
+						"watch_time_ms":     50000 + len(media.MediaKey)*1000,
 					},
 				})
 			} else {
@@ -5797,43 +6053,43 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					// Fallback to hourly if somehow an invalid value got through
 					periodDuration = time.Hour
 				}
-				
+
 				currentTime := startTime
 				for currentTime.Before(endTime) || currentTime.Equal(endTime) {
 					// Generate mock metrics for this time period
 					// Vary metrics based on media key and time to make it realistic
 					timeHash := int64(currentTime.Unix()) % 100
 					keyHash := int64(len(media.MediaKey)) % 50
-					
+
 					timestampedMetrics = append(timestampedMetrics, map[string]interface{}{
 						"timestamp": currentTime.Format(time.RFC3339),
 						"metrics": map[string]interface{}{
-							"video_views":           int64(50 + timeHash + keyHash),
-							"playback_start":        int64(40 + timeHash + keyHash),
-							"playback25":            int64(30 + timeHash + keyHash),
-							"playback50":            int64(20 + timeHash + keyHash),
-							"playback75":            int64(10 + timeHash + keyHash),
-							"playback_complete":     int64(5 + timeHash/2 + keyHash/2),
-							"play_from_tap":         int64(10 + timeHash/2 + keyHash/2),
-							"cta_url_clicks":        int64(5 + timeHash/3 + keyHash/3),
-							"cta_watch_clicks":      int64(2 + timeHash/4 + keyHash/4),
-							"watch_time_ms":         int64(20000 + timeHash*100 + keyHash*100),
+							"video_views":       int64(50 + timeHash + keyHash),
+							"playback_start":    int64(40 + timeHash + keyHash),
+							"playback25":        int64(30 + timeHash + keyHash),
+							"playback50":        int64(20 + timeHash + keyHash),
+							"playback75":        int64(10 + timeHash + keyHash),
+							"playback_complete": int64(5 + timeHash/2 + keyHash/2),
+							"play_from_tap":     int64(10 + timeHash/2 + keyHash/2),
+							"cta_url_clicks":    int64(5 + timeHash/3 + keyHash/3),
+							"cta_watch_clicks":  int64(2 + timeHash/4 + keyHash/4),
+							"watch_time_ms":     int64(20000 + timeHash*100 + keyHash*100),
 						},
 					})
-					
+
 					currentTime = currentTime.Add(periodDuration)
 				}
 			}
-			
+
 			mediaAnalytics["timestamped_metrics"] = timestampedMetrics
 			analyticsData = append(analyticsData, mediaAnalytics)
 		}
-		
+
 		// Build response with data and errors (if any media keys were not found)
 		response := map[string]interface{}{
 			"data": analyticsData,
 		}
-		
+
 		// Add "Not Found" errors for any media keys that don't exist
 		if len(notFoundKeys) > 0 {
 			var errors []map[string]interface{}
@@ -5850,7 +6106,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			}
 			response["errors"] = errors
 		}
-		
+
 		data, statusCode := MarshalJSONResponse(response)
 		return data, statusCode
 	}
@@ -5890,8 +6146,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		response := map[string]interface{}{
 			"data": eventsData,
 		}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+		data, statusCode := MarshalJSONResponse(response)
+		return data, statusCode
 	}
 
 	// POST /2/dm_events
@@ -5931,8 +6187,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		response := map[string]interface{}{
 			"data": conversationsData,
 		}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+		data, statusCode := MarshalJSONResponse(response)
+		return data, statusCode
 	}
 
 	// POST /2/dm_conversations
@@ -5984,8 +6240,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			response := map[string]interface{}{
 				"data": eventsData,
 			}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+			data, statusCode := MarshalJSONResponse(response)
+			return data, statusCode
 		}
 	}
 
@@ -6063,8 +6319,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			response := map[string]interface{}{
 				"data": eventsData,
 			}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+			data, statusCode := MarshalJSONResponse(response)
+			return data, statusCode
 		}
 	}
 
@@ -6087,8 +6343,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			response := map[string]interface{}{
 				"data": eventsData,
 			}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+			data, statusCode := MarshalJSONResponse(response)
+			return data, statusCode
 		}
 	}
 
@@ -6182,8 +6438,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				"result_count": len(jobsData),
 			},
 		}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+		data, statusCode := MarshalJSONResponse(response)
+		return data, statusCode
 	}
 
 	// GET /2/compliance/jobs/{id}
@@ -6290,11 +6546,11 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		newsData := make([]map[string]interface{}, len(news))
 		for i, article := range news {
 			articleMap := map[string]interface{}{
-				"id":        article.ID,
-				"name":      article.Name,
-				"summary":   article.Summary,
-				"hook":      article.Hook,
-				"category":  article.Category,
+				"id":         article.ID,
+				"name":       article.Name,
+				"summary":    article.Summary,
+				"hook":       article.Hook,
+				"category":   article.Category,
 				"updated_at": article.UpdatedAt.Format(time.RFC3339),
 				"disclaimer": article.Disclaimer,
 			}
@@ -6309,8 +6565,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				"result_count": len(newsData),
 			},
 		}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+		data, statusCode := MarshalJSONResponse(response)
+		return data, statusCode
 	}
 
 	// GET /2/news/{id}
@@ -6376,8 +6632,8 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				"result_count": len(notesData),
 			},
 		}
-				data, statusCode := MarshalJSONResponse(response)
-				return data, statusCode
+		data, statusCode := MarshalJSONResponse(response)
+		return data, statusCode
 	}
 
 	// GET /2/notes/search/posts_eligible_for_notes
@@ -6446,7 +6702,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			if note != nil {
 				response := map[string]interface{}{
 					"data": map[string]interface{}{
-						"note_id": req.NoteID,
+						"note_id":   req.NoteID,
 						"evaluated": true,
 					},
 				}
@@ -6477,7 +6733,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					maxTrends = parsed
 				}
 			}
-			
+
 			// Calculate trends from state data (hashtags)
 			allTweets := state.GetAllTweets()
 			hashtagCounts := make(map[string]int)
@@ -6488,7 +6744,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					}
 				}
 			}
-			
+
 			type trend struct {
 				Name  string
 				Count int
@@ -6497,7 +6753,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			for name, count := range hashtagCounts {
 				trends = append(trends, trend{Name: name, Count: count})
 			}
-			
+
 			// Sort by count (descending) - use proper sorting
 			for i := 0; i < len(trends)-1; i++ {
 				for j := i + 1; j < len(trends); j++ {
@@ -6506,28 +6762,28 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 					}
 				}
 			}
-			
+
 			// Limit to max_trends
 			if len(trends) > maxTrends {
 				trends = trends[:maxTrends]
 			}
-			
+
 			// Use correct field names: trend_name and tweet_count (matching real API)
 			trendsData := make([]map[string]interface{}, len(trends))
 			for i, t := range trends {
 				trendsData[i] = map[string]interface{}{
-					"trend_name": t.Name,
+					"trend_name":  t.Name,
 					"tweet_count": t.Count,
 				}
 			}
 			response := map[string]interface{}{
 				"data": trendsData,
 			}
-			
+
 			// Apply field filtering using the standard filter function
 			// This handles trend.fields parameter properly
 			response = filterResponseByQueryParams(response, queryParams, op)
-			
+
 			log.Printf("DEBUG trends: Returning %d trends (max_trends=%d), response has %d items in data array", len(trends), maxTrends, len(trendsData))
 			data, statusCode := MarshalJSONResponse(response)
 			return data, statusCode
@@ -6537,7 +6793,6 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 	log.Printf("DEBUG trends: Trends endpoint not matched, path='%s', method='%s'", path, method)
 
 	// Activity subscription endpoints removed - not ready to support yet
-
 
 	// GET /2/users/{id}/following - Get users that a user follows
 	if method == "GET" && strings.Contains(path, "/users/") && strings.HasSuffix(path, "/following") && !strings.Contains(path, "/following/") {
@@ -6918,8 +7173,8 @@ func formatStateDataToOpenAPI(data interface{}, op *EndpointOperation, spec *Ope
 	var dataMap map[string]interface{}
 	var isArray bool
 	var arrayData []map[string]interface{}
-	
-		if user, ok := data.(*User); ok {
+
+	if user, ok := data.(*User); ok {
 		dataMap = FormatUser(user)
 		// Apply field filtering - default fields: id, name, username (matching X API)
 		if queryParams != nil {
@@ -7012,15 +7267,15 @@ func formatStateDataToOpenAPI(data interface{}, op *EndpointOperation, spec *Ope
 				} else {
 					userMap = filterUserFields(userMap, []string{"id", "name", "username"})
 				}
-		} else {
-			userMap = filterUserFields(userMap, []string{"id", "name", "username"})
+			} else {
+				userMap = filterUserFields(userMap, []string{"id", "name", "username"})
+			}
+			// Add expansion fields to user if expansions are requested
+			if queryParams != nil && len(queryParams.Expansions) > 0 {
+				addExpansionFieldsToUser(userMap, u, queryParams.Expansions)
+			}
+			arrayData[i] = userMap
 		}
-		// Add expansion fields to user if expansions are requested
-		if queryParams != nil && len(queryParams.Expansions) > 0 {
-			addExpansionFieldsToUser(userMap, u, queryParams.Expansions)
-		}
-		arrayData[i] = userMap
-	}
 	} else if tweets, ok := data.([]*Tweet); ok {
 		isArray = true
 		arrayData = make([]map[string]interface{}, len(tweets))
@@ -7066,7 +7321,7 @@ func formatStateDataToOpenAPI(data interface{}, op *EndpointOperation, spec *Ope
 	// Only add includes if expansions are explicitly requested
 	if queryParams != nil && len(queryParams.Expansions) > 0 && state != nil {
 		includes := make(map[string]interface{})
-		
+
 		// Handle expansions for tweets
 		var tweetsForExpansion []*Tweet
 		if tweet, ok := data.(*Tweet); ok {
@@ -7074,7 +7329,7 @@ func formatStateDataToOpenAPI(data interface{}, op *EndpointOperation, spec *Ope
 		} else if tweets, ok := data.([]*Tweet); ok {
 			tweetsForExpansion = tweets
 		}
-		
+
 		if len(tweetsForExpansion) > 0 {
 			tweetIncludes := buildExpansions(tweetsForExpansion, queryParams.Expansions, state, spec, queryParams)
 			// Merge tweet expansions into includes
@@ -7082,7 +7337,7 @@ func formatStateDataToOpenAPI(data interface{}, op *EndpointOperation, spec *Ope
 				includes[k] = v
 			}
 		}
-		
+
 		// Handle expansions for users (e.g., pinned_tweet_id)
 		var usersForExpansion []*User
 		if user, ok := data.(*User); ok {
@@ -7090,7 +7345,7 @@ func formatStateDataToOpenAPI(data interface{}, op *EndpointOperation, spec *Ope
 		} else if users, ok := data.([]*User); ok {
 			usersForExpansion = users
 		}
-		
+
 		if len(usersForExpansion) > 0 {
 			userIncludes := buildUserExpansions(usersForExpansion, queryParams.Expansions, state, spec, queryParams)
 			// Merge user expansions into includes
@@ -7118,7 +7373,7 @@ func formatStateDataToOpenAPI(data interface{}, op *EndpointOperation, spec *Ope
 				}
 			}
 		}
-		
+
 		// Always add includes object (even if empty) when expansions are requested
 		// This matches real API behavior where includes is always present when requested
 		response["includes"] = includes
@@ -7246,8 +7501,8 @@ func formatDMEvent(event *DMEvent) map[string]interface{} {
 // formatMedia formats media for response
 func formatMedia(media *Media) map[string]interface{} {
 	result := map[string]interface{}{
-		"id":                media.ID,
-		"media_key":         media.MediaKey,
+		"id":                 media.ID,
+		"media_key":          media.MediaKey,
 		"expires_after_secs": media.ExpiresAfterSecs,
 	}
 
@@ -7310,7 +7565,7 @@ func formatSearchTweetsResponse(tweets []*Tweet, queryParams *QueryParams, state
 		oldestID := tweets[0].ID
 		newestTime := tweets[0].CreatedAt
 		oldestTime := tweets[0].CreatedAt
-		
+
 		for _, tweet := range tweets {
 			if tweet.CreatedAt.After(newestTime) {
 				newestID = tweet.ID
@@ -7323,7 +7578,7 @@ func formatSearchTweetsResponse(tweets []*Tweet, queryParams *QueryParams, state
 		}
 		meta["newest_id"] = newestID
 		meta["oldest_id"] = oldestID
-		
+
 		// Add next_token if we got the full limit (simplified pagination)
 		// In a real implementation, this would check if there are more results available
 		// For now, we'll add next_token if we got exactly the requested limit
@@ -7403,4 +7658,3 @@ func setupFallbackHandlers(mux *http.ServeMux, state *State) {
 	mux.HandleFunc("/2/tweets", handleTweets(state))
 	mux.HandleFunc("/2/oauth2/token", handleOAuthToken(state))
 }
-

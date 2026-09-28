@@ -36,24 +36,24 @@ type OpenAPISpec struct {
 // PathItem represents an OpenAPI path item.
 // Contains operations (GET, POST, etc.) and path-level parameters.
 type PathItem struct {
-	Parameters []Parameter  `json:"parameters,omitempty"` // Parameters defined at path level (apply to all operations)
-	Get        *Operation   `json:"get,omitempty"`
-	Post       *Operation   `json:"post,omitempty"`
-	Put        *Operation   `json:"put,omitempty"`
-	Patch      *Operation   `json:"patch,omitempty"`
-	Delete     *Operation   `json:"delete,omitempty"`
+	Parameters []Parameter `json:"parameters,omitempty"` // Parameters defined at path level (apply to all operations)
+	Get        *Operation  `json:"get,omitempty"`
+	Post       *Operation  `json:"post,omitempty"`
+	Put        *Operation  `json:"put,omitempty"`
+	Patch      *Operation  `json:"patch,omitempty"`
+	Delete     *Operation  `json:"delete,omitempty"`
 }
 
 // Operation represents an OpenAPI operation.
 // Contains request/response schemas, parameters, and security requirements.
 type Operation struct {
-	OperationID string                 `json:"operationId"`
-	Summary     string                 `json:"summary"`
-	Description string                 `json:"description"`
-	Tags        []string               `json:"tags"`
-	Parameters  []Parameter            `json:"parameters,omitempty"`
-	RequestBody *RequestBody           `json:"requestBody,omitempty"`
-	Responses   map[string]Response    `json:"responses"`
+	OperationID string                   `json:"operationId"`
+	Summary     string                   `json:"summary"`
+	Description string                   `json:"description"`
+	Tags        []string                 `json:"tags"`
+	Parameters  []Parameter              `json:"parameters,omitempty"`
+	RequestBody *RequestBody             `json:"requestBody,omitempty"`
+	Responses   map[string]Response      `json:"responses"`
 	Security    []map[string]interface{} `json:"security,omitempty"` // Security requirements
 }
 
@@ -76,7 +76,7 @@ func (p *Parameter) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("failed to unmarshal parameter as map: %w", err)
 	}
-	
+
 	// If it's just a $ref (most common case for shared parameters), capture it and return
 	if ref, ok := raw["$ref"].(string); ok {
 		if len(raw) == 1 {
@@ -87,7 +87,7 @@ func (p *Parameter) UnmarshalJSON(data []byte) error {
 		// $ref mixed with other fields - store ref but continue unmarshaling
 		p.Ref = ref
 	}
-	
+
 	// Unmarshal normally into the struct (handles all other fields)
 	// Use a temporary type to avoid infinite recursion
 	type parameterAlias Parameter
@@ -95,14 +95,14 @@ func (p *Parameter) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &alias); err != nil {
 		return fmt.Errorf("failed to unmarshal parameter struct: %w", err)
 	}
-	
+
 	*p = Parameter(alias)
-	
+
 	// Ensure $ref is set if it was in the raw data
 	if ref, ok := raw["$ref"].(string); ok {
 		p.Ref = ref
 	}
-	
+
 	return nil
 }
 
@@ -189,13 +189,13 @@ func getCacheInfo() *CacheInfo {
 	if err != nil {
 		return &CacheInfo{
 			Path:   cachePath,
-			Exists:  false,
+			Exists: false,
 		}
 	}
 
 	return &CacheInfo{
 		Path:    cachePath,
-		ModTime:  info.ModTime(),
+		ModTime: info.ModTime(),
 		Age:     time.Since(info.ModTime()),
 		Exists:  true,
 	}
@@ -351,7 +351,7 @@ func (s *OpenAPISpec) GetEndpointOperations(path string) []EndpointOperation {
 		lastSegment = pathParts[len(pathParts)-1]
 	}
 	hasUnderscoreInLastSegment := strings.Contains(lastSegment, "_")
-	
+
 	for specPath, pathItem := range s.Paths {
 		if matchesPath(specPath, path) {
 			// Filter out bad matches: if last segment has underscore and spec path has parameter in last position
@@ -550,20 +550,34 @@ func (op *Operation) GetResponseExample(statusCode string) interface{} {
 	return nil
 }
 
-// GetRequestBodySchema extracts the request body schema from an operation
+// GetRequestBodySchema extracts the JSON request body schema from an operation.
+// Kept for backwards compatibility with callers that assume application/json.
 func (op *Operation) GetRequestBodySchema() map[string]interface{} {
+	return op.GetRequestBodySchemaForContentType("application/json")
+}
+
+// GetRequestBodySchemaForContentType extracts the request body schema that
+// corresponds to the actual request Content-Type.
+func (op *Operation) GetRequestBodySchemaForContentType(contentType string) map[string]interface{} {
 	if op.RequestBody == nil {
 		return nil
 	}
 
-	// Try to get application/json content
-	if content, ok := op.RequestBody.Content["application/json"].(map[string]interface{}); ok {
-		if schema, ok := content["schema"].(map[string]interface{}); ok {
-			return schema
-		}
+	// Strip parameters such as:
+	// multipart/form-data; boundary=------------------------abc123
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+
+	if mediaType == "" {
+		mediaType = "application/json"
 	}
 
-	return nil
+	content, ok := op.RequestBody.Content[mediaType].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	schema, _ := content["schema"].(map[string]interface{})
+	return schema
 }
 
 // HasRequestBody checks if the operation requires a request body
@@ -619,7 +633,7 @@ func (op *Operation) GetQueryParametersWithSpec(spec *OpenAPISpec) []Parameter {
 // including parameters defined at the path level, resolving $ref references
 func (op *Operation) GetQueryParametersWithPathParams(pathItem *PathItem, spec *OpenAPISpec) []Parameter {
 	var queryParams []Parameter
-	
+
 	// First, add path-level parameters (these apply to all operations)
 	if pathItem != nil {
 		for _, param := range pathItem.Parameters {
@@ -638,7 +652,7 @@ func (op *Operation) GetQueryParametersWithPathParams(pathItem *PathItem, spec *
 			}
 		}
 	}
-	
+
 	// Then, add operation-level parameters (these override path-level ones with same name)
 	for _, param := range op.Parameters {
 		// Resolve $ref if present
@@ -659,7 +673,7 @@ func (op *Operation) GetQueryParametersWithPathParams(pathItem *PathItem, spec *
 			}
 		}
 	}
-	
+
 	return queryParams
 }
 
@@ -685,7 +699,7 @@ func (s *OpenAPISpec) ResolveRef(ref string) map[string]interface{} {
 	}
 
 	schemaName := strings.TrimPrefix(ref, "#/components/schemas/")
-	
+
 	if s.Components == nil {
 		if SchemaDebug {
 			log.Printf("DEBUG: Components is nil")
@@ -758,7 +772,7 @@ func (s *OpenAPISpec) ResolveParameterRef(ref string) *Parameter {
 	}
 
 	paramName := strings.TrimPrefix(ref, "#/components/parameters/")
-	
+
 	if s.Components == nil {
 		return nil
 	}
@@ -787,4 +801,3 @@ func (s *OpenAPISpec) ResolveParameterRef(ref string) *Parameter {
 
 	return &param
 }
-

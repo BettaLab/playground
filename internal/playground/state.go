@@ -11,11 +11,17 @@
 package playground
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"log"
 	"math/rand"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -37,21 +43,21 @@ type SearchWebhook struct {
 
 // State manages the in-memory state of the playground server
 type State struct {
-	mu      sync.RWMutex
+	mu       sync.RWMutex
 	importMu sync.Mutex // Mutex to prevent concurrent imports
-	users   map[string]*User
-	tweets  map[string]*Tweet
-	media   map[string]*Media
-	lists   map[string]*List
-	spaces  map[string]*Space
-	polls   map[string]*Poll
-	places  map[string]*Place
-	topics  map[string]*Topic
-	nextID  int64
-	config  *PlaygroundConfig // Store config for access in handlers
+	users    map[string]*User
+	tweets   map[string]*Tweet
+	media    map[string]*Media
+	lists    map[string]*List
+	spaces   map[string]*Space
+	polls    map[string]*Poll
+	places   map[string]*Place
+	topics   map[string]*Topic
+	nextID   int64
+	config   *PlaygroundConfig // Store config for access in handlers
 	// Search stream rules and webhooks
 	searchStreamRules map[string]*SearchStreamRule
-	searchWebhooks   map[string]*SearchWebhook
+	searchWebhooks    map[string]*SearchWebhook
 	// DMs
 	dmConversations map[string]*DMConversation
 	dmEvents        map[string]*DMEvent
@@ -73,35 +79,35 @@ type State struct {
 // User represents a user in the playground.
 // Matches the X API v2 User object structure with additional internal relationship tracking.
 type User struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	Username        string    `json:"username"`
-	CreatedAt       time.Time `json:"created_at"`
-	Description     string    `json:"description,omitempty"`
-	Location        string    `json:"location,omitempty"`
-	URL             string    `json:"url,omitempty"`
-	Verified        bool      `json:"verified,omitempty"`
-	VerifiedType    string    `json:"verified_type,omitempty"` // "blue", "business", "government", "none"
-	Protected       bool      `json:"protected,omitempty"`
-	PublicMetrics   UserMetrics `json:"public_metrics"`
-	ProfileImageURL string    `json:"profile_image_url,omitempty"`
-	PinnedTweetID   string    `json:"pinned_tweet_id,omitempty"`
+	ID              string        `json:"id"`
+	Name            string        `json:"name"`
+	Username        string        `json:"username"`
+	CreatedAt       time.Time     `json:"created_at"`
+	Description     string        `json:"description,omitempty"`
+	Location        string        `json:"location,omitempty"`
+	URL             string        `json:"url,omitempty"`
+	Verified        bool          `json:"verified,omitempty"`
+	VerifiedType    string        `json:"verified_type,omitempty"` // "blue", "business", "government", "none"
+	Protected       bool          `json:"protected,omitempty"`
+	PublicMetrics   UserMetrics   `json:"public_metrics"`
+	ProfileImageURL string        `json:"profile_image_url,omitempty"`
+	PinnedTweetID   string        `json:"pinned_tweet_id,omitempty"`
 	Entities        *UserEntities `json:"entities,omitempty"`
 	Withheld        *UserWithheld `json:"withheld,omitempty"` // Withheld information
 	// Relationships
-	Tweets          []string  `json:"-"` // Tweet IDs (owned tweets)
-	LikedTweets     []string  `json:"-"` // Tweet IDs (liked)
-	RetweetedTweets []string  `json:"-"` // Tweet IDs (retweeted)
-	Following       []string  `json:"-"` // User IDs (following)
-	Followers       []string  `json:"-"` // User IDs (followers - reverse relationship)
-	Lists           []string  `json:"-"` // List IDs (owned lists)
-	ListMemberships []string  `json:"-"` // List IDs (member of)
-	Spaces          []string  `json:"-"` // Space IDs (hosted spaces)
-	MutedUsers      []string  `json:"-"` // User IDs (muted)
-	BlockedUsers    []string  `json:"-"` // User IDs (blocked)
-	BookmarkedTweets []string  `json:"-"` // Tweet IDs (bookmarked)
-	FollowedLists   []string  `json:"-"` // List IDs (followed lists)
-	PinnedLists     []string  `json:"-"` // List IDs (pinned lists)
+	Tweets           []string `json:"-"` // Tweet IDs (owned tweets)
+	LikedTweets      []string `json:"-"` // Tweet IDs (liked)
+	RetweetedTweets  []string `json:"-"` // Tweet IDs (retweeted)
+	Following        []string `json:"-"` // User IDs (following)
+	Followers        []string `json:"-"` // User IDs (followers - reverse relationship)
+	Lists            []string `json:"-"` // List IDs (owned lists)
+	ListMemberships  []string `json:"-"` // List IDs (member of)
+	Spaces           []string `json:"-"` // Space IDs (hosted spaces)
+	MutedUsers       []string `json:"-"` // User IDs (muted)
+	BlockedUsers     []string `json:"-"` // User IDs (blocked)
+	BookmarkedTweets []string `json:"-"` // Tweet IDs (bookmarked)
+	FollowedLists    []string `json:"-"` // List IDs (followed lists)
+	PinnedLists      []string `json:"-"` // List IDs (pinned lists)
 }
 
 // UserWithheld represents withheld information for a user.
@@ -112,7 +118,7 @@ type UserWithheld struct {
 
 // UserEntities represents entities in user profile.
 type UserEntities struct {
-	URL         *UserURLEntity `json:"url,omitempty"`
+	URL         *UserURLEntity         `json:"url,omitempty"`
 	Description *UserDescriptionEntity `json:"description,omitempty"`
 }
 
@@ -136,38 +142,38 @@ type UserMetrics struct {
 	FollowingCount int `json:"following_count"`
 	TweetCount     int `json:"tweet_count"`
 	ListedCount    int `json:"listed_count,omitempty"`
-	LikeCount      int `json:"like_count,omitempty"`    // Total likes on user's tweets
-	MediaCount     int `json:"media_count,omitempty"`   // Total media items in user's tweets
+	LikeCount      int `json:"like_count,omitempty"`  // Total likes on user's tweets
+	MediaCount     int `json:"media_count,omitempty"` // Total media items in user's tweets
 }
 
 // Tweet represents a tweet in the playground.
 // Matches the X API v2 Tweet object structure with additional internal relationship tracking.
 type Tweet struct {
-	ID              string    `json:"id"`
-	Text            string    `json:"text"`
-	AuthorID        string    `json:"author_id"`
-	CreatedAt       time.Time `json:"created_at"`
-	EditHistoryTweetIDs []string `json:"edit_history_tweet_ids,omitempty"` // Array of tweet IDs in edit history
-	ConversationID  string    `json:"conversation_id,omitempty"`
-	InReplyToID     string    `json:"in_reply_to_user_id,omitempty"`
-	InReplyToTweetID string   `json:"in_reply_to_tweet_id,omitempty"`
-	ReferencedTweets []ReferencedTweet `json:"referenced_tweets,omitempty"`
-	PublicMetrics   TweetMetrics `json:"public_metrics"`
-	Entities        *TweetEntities `json:"entities,omitempty"`
-	Attachments     *TweetAttachments `json:"attachments,omitempty"`
-	Source          string    `json:"source,omitempty"`
-	Lang            string    `json:"lang,omitempty"`
-	PossiblySensitive bool    `json:"possibly_sensitive,omitempty"`
-	Hidden          bool      `json:"hidden,omitempty"` // Hidden reply
+	ID                  string            `json:"id"`
+	Text                string            `json:"text"`
+	AuthorID            string            `json:"author_id"`
+	CreatedAt           time.Time         `json:"created_at"`
+	EditHistoryTweetIDs []string          `json:"edit_history_tweet_ids,omitempty"` // Array of tweet IDs in edit history
+	ConversationID      string            `json:"conversation_id,omitempty"`
+	InReplyToID         string            `json:"in_reply_to_user_id,omitempty"`
+	InReplyToTweetID    string            `json:"in_reply_to_tweet_id,omitempty"`
+	ReferencedTweets    []ReferencedTweet `json:"referenced_tweets,omitempty"`
+	PublicMetrics       TweetMetrics      `json:"public_metrics"`
+	Entities            *TweetEntities    `json:"entities,omitempty"`
+	Attachments         *TweetAttachments `json:"attachments,omitempty"`
+	Source              string            `json:"source,omitempty"`
+	Lang                string            `json:"lang,omitempty"`
+	PossiblySensitive   bool              `json:"possibly_sensitive,omitempty"`
+	Hidden              bool              `json:"hidden,omitempty"` // Hidden reply
 	// Relationships
-	LikedBy         []string  `json:"-"` // User IDs (users who liked)
-	RetweetedBy     []string  `json:"-"` // User IDs (users who retweeted)
-	Replies         []string  `json:"-"` // Tweet IDs (reply tweets)
-	Quotes          []string  `json:"-"` // Tweet IDs (tweets quoting this)
-	Media           []string  `json:"-"` // Media IDs
-	PollID          string    `json:"-"` // Poll ID (if poll tweet)
-	PlaceID         string    `json:"-"` // Place ID (if geo-tagged)
-	SpaceID         string    `json:"-"` // Space ID (if tweet is associated with a space)
+	LikedBy     []string `json:"-"` // User IDs (users who liked)
+	RetweetedBy []string `json:"-"` // User IDs (users who retweeted)
+	Replies     []string `json:"-"` // Tweet IDs (reply tweets)
+	Quotes      []string `json:"-"` // Tweet IDs (tweets quoting this)
+	Media       []string `json:"-"` // Media IDs
+	PollID      string   `json:"-"` // Poll ID (if poll tweet)
+	PlaceID     string   `json:"-"` // Place ID (if geo-tagged)
+	SpaceID     string   `json:"-"` // Space ID (if tweet is associated with a space)
 }
 
 // ReferencedTweet represents a referenced tweet.
@@ -206,16 +212,16 @@ type EntityMention struct {
 // EntityURL represents a URL entity.
 // Contains start/end positions, URL, expanded URL, and optional metadata.
 type EntityURL struct {
-	Start       int      `json:"start"`
-	End         int      `json:"end"`
-	URL         string   `json:"url"`
-	ExpandedURL string   `json:"expanded_url,omitempty"`
-	DisplayURL  string   `json:"display_url,omitempty"`
+	Start       int        `json:"start"`
+	End         int        `json:"end"`
+	URL         string     `json:"url"`
+	ExpandedURL string     `json:"expanded_url,omitempty"`
+	DisplayURL  string     `json:"display_url,omitempty"`
 	Images      []URLImage `json:"images,omitempty"`
-	Status      int      `json:"status,omitempty"`
-	Title       string   `json:"title,omitempty"`
-	Description string   `json:"description,omitempty"`
-	UnwoundURL  string   `json:"unwound_url,omitempty"`
+	Status      int        `json:"status,omitempty"`
+	Title       string     `json:"title,omitempty"`
+	Description string     `json:"description,omitempty"`
+	UnwoundURL  string     `json:"unwound_url,omitempty"`
 }
 
 // URLImage represents an image in a URL entity.
@@ -243,11 +249,11 @@ type TweetAttachments struct {
 // TweetMetrics represents tweet public metrics.
 // Includes retweet count, like count, reply count, quote count, and engagement metrics.
 type TweetMetrics struct {
-	RetweetCount   int `json:"retweet_count"`
-	LikeCount      int `json:"like_count"`
-	ReplyCount     int `json:"reply_count"`
-	QuoteCount     int `json:"quote_count"`
-	BookmarkCount  int `json:"bookmark_count"`  // Always include (even if 0) to match real API
+	RetweetCount    int `json:"retweet_count"`
+	LikeCount       int `json:"like_count"`
+	ReplyCount      int `json:"reply_count"`
+	QuoteCount      int `json:"quote_count"`
+	BookmarkCount   int `json:"bookmark_count"`   // Always include (even if 0) to match real API
 	ImpressionCount int `json:"impression_count"` // Always include (even if 0) to match real API
 }
 
@@ -261,43 +267,43 @@ type List struct {
 	OwnerID       string    `json:"owner_id"`
 	Private       bool      `json:"private,omitempty"`
 	MemberCount   int       `json:"member_count"`
-	FollowerCount int      `json:"follower_count"`
+	FollowerCount int       `json:"follower_count"`
 	// Relationships
-	Members       []string  `json:"-"` // User IDs
-	Followers     []string  `json:"-"` // User IDs (list followers)
+	Members   []string `json:"-"` // User IDs
+	Followers []string `json:"-"` // User IDs (list followers)
 }
 
 // Space represents a space in the playground.
 // Matches the X API v2 Space object structure.
 type Space struct {
-	ID              string    `json:"id"`
-	State           string    `json:"state"` // scheduled, live, ended
-	Title           string    `json:"title,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at,omitempty"`
-	StartedAt       time.Time `json:"started_at,omitempty"`
-	EndedAt         time.Time `json:"ended_at,omitempty"`
-	ScheduledStart  time.Time `json:"scheduled_start,omitempty"`
-	CreatorID       string    `json:"creator_id,omitempty"`
-	HostIDs         []string  `json:"host_ids,omitempty"`
-	SpeakerIDs      []string  `json:"speaker_ids,omitempty"`
-	InvitedUserIDs  []string  `json:"invited_user_ids,omitempty"`
-	SubscriberCount int       `json:"subscriber_count,omitempty"`
-	ParticipantCount int      `json:"participant_count,omitempty"`
-	IsTicketed      bool      `json:"is_ticketed,omitempty"`
-	Lang            string    `json:"lang,omitempty"`
-	TopicIDs        []string  `json:"-"` // Topic IDs (for relationships)
-	BuyerIDs        []string  `json:"-"` // User IDs (users who bought tickets)
+	ID               string    `json:"id"`
+	State            string    `json:"state"` // scheduled, live, ended
+	Title            string    `json:"title,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at,omitempty"`
+	StartedAt        time.Time `json:"started_at,omitempty"`
+	EndedAt          time.Time `json:"ended_at,omitempty"`
+	ScheduledStart   time.Time `json:"scheduled_start,omitempty"`
+	CreatorID        string    `json:"creator_id,omitempty"`
+	HostIDs          []string  `json:"host_ids,omitempty"`
+	SpeakerIDs       []string  `json:"speaker_ids,omitempty"`
+	InvitedUserIDs   []string  `json:"invited_user_ids,omitempty"`
+	SubscriberCount  int       `json:"subscriber_count,omitempty"`
+	ParticipantCount int       `json:"participant_count,omitempty"`
+	IsTicketed       bool      `json:"is_ticketed,omitempty"`
+	Lang             string    `json:"lang,omitempty"`
+	TopicIDs         []string  `json:"-"` // Topic IDs (for relationships)
+	BuyerIDs         []string  `json:"-"` // User IDs (users who bought tickets)
 }
 
 // Poll represents a poll in the playground.
 // Matches the X API v2 Poll object structure.
 type Poll struct {
-	ID              string    `json:"id"`
+	ID              string       `json:"id"`
 	Options         []PollOption `json:"options"`
-	DurationMinutes int       `json:"duration_minutes"`
-	EndDatetime     time.Time `json:"end_datetime,omitempty"`
-	VotingStatus    string    `json:"voting_status,omitempty"` // open, closed
+	DurationMinutes int          `json:"duration_minutes"`
+	EndDatetime     time.Time    `json:"end_datetime,omitempty"`
+	VotingStatus    string       `json:"voting_status,omitempty"` // open, closed
 }
 
 // PollOption represents a poll option.
@@ -310,27 +316,27 @@ type PollOption struct {
 // Place represents a place/location in the playground.
 // Matches the X API v2 Place object structure.
 type Place struct {
-	ID          string    `json:"id"`
-	FullName    string    `json:"full_name"`
-	Name        string    `json:"name"`
-	Country     string    `json:"country"`
-	CountryCode string    `json:"country_code"`
-	PlaceType   string    `json:"place_type"` // city, admin, country, poi
-	Geo         PlaceGeo  `json:"geo,omitempty"`
+	ID          string   `json:"id"`
+	FullName    string   `json:"full_name"`
+	Name        string   `json:"name"`
+	Country     string   `json:"country"`
+	CountryCode string   `json:"country_code"`
+	PlaceType   string   `json:"place_type"` // city, admin, country, poi
+	Geo         PlaceGeo `json:"geo,omitempty"`
 }
 
 // PlaceGeo represents geographic coordinates
 type PlaceGeo struct {
-	Type        string    `json:"type"` // Point
+	Type        string    `json:"type"`        // Point
 	Coordinates []float64 `json:"coordinates"` // [longitude, latitude]
 }
 
 // Topic represents a topic in the playground.
 // Matches the X API v2 Topic object structure.
 type Topic struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description,omitempty"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 // PersonalizedTrend represents a personalized trending topic.
@@ -369,7 +375,7 @@ type DMEvent struct {
 type ComplianceJob struct {
 	ID                string    `json:"id"`
 	Name              string    `json:"name"`
-	Type              string    `json:"type"` // "tweets", "users"
+	Type              string    `json:"type"`   // "tweets", "users"
 	Status            string    `json:"status"` // "in_progress", "complete", "failed"
 	CreatedAt         time.Time `json:"created_at"`
 	UploadURL         string    `json:"upload_url,omitempty"`
@@ -392,26 +398,26 @@ type Community struct {
 // News represents a news article.
 // Matches the X API v2 News object structure.
 type News struct {
-	ID              string                 `json:"id"`
-	RestID          string                 `json:"rest_id,omitempty"`
-	Name            string                 `json:"name"`
-	Summary         string                 `json:"summary"`
-	Hook            string                 `json:"hook"`
-	Category        string                 `json:"category"`
-	UpdatedAt       time.Time              `json:"updated_at"`
-	LastUpdatedAtMs string                 `json:"last_updated_at_ms,omitempty"`
-	Disclaimer      string                 `json:"disclaimer"`
-	Contexts        *NewsContexts          `json:"contexts,omitempty"`
-	Keywords        []string               `json:"keywords,omitempty"`
+	ID                  string                   `json:"id"`
+	RestID              string                   `json:"rest_id,omitempty"`
+	Name                string                   `json:"name"`
+	Summary             string                   `json:"summary"`
+	Hook                string                   `json:"hook"`
+	Category            string                   `json:"category"`
+	UpdatedAt           time.Time                `json:"updated_at"`
+	LastUpdatedAtMs     string                   `json:"last_updated_at_ms,omitempty"`
+	Disclaimer          string                   `json:"disclaimer"`
+	Contexts            *NewsContexts            `json:"contexts,omitempty"`
+	Keywords            []string                 `json:"keywords,omitempty"`
 	ClusterPostsResults []map[string]interface{} `json:"cluster_posts_results,omitempty"`
 }
 
 // NewsContexts represents the contexts object in news articles
 type NewsContexts struct {
-	Topics      []string               `json:"topics,omitempty"`
-	Entities    *NewsEntities          `json:"entities,omitempty"`
-	Finance     *NewsFinance           `json:"finance,omitempty"`
-	Sports      *NewsSports            `json:"sports,omitempty"`
+	Topics   []string      `json:"topics,omitempty"`
+	Entities *NewsEntities `json:"entities,omitempty"`
+	Finance  *NewsFinance  `json:"finance,omitempty"`
+	Sports   *NewsSports   `json:"sports,omitempty"`
 }
 
 // NewsEntities represents entities in news contexts
@@ -436,39 +442,45 @@ type NewsSports struct {
 // Note represents a note.
 // Matches the X API v2 Note object structure.
 type Note struct {
-	ID          string    `json:"id"`
-	Text        string    `json:"text"`
-	AuthorID    string    `json:"author_id"`
-	CreatedAt   time.Time `json:"created_at"`
-	PostID      string    `json:"post_id,omitempty"` // Tweet ID this note is about
+	ID        string    `json:"id"`
+	Text      string    `json:"text"`
+	AuthorID  string    `json:"author_id"`
+	CreatedAt time.Time `json:"created_at"`
+	PostID    string    `json:"post_id,omitempty"` // Tweet ID this note is about
 }
 
 // ActivitySubscription represents an activity subscription.
 // Matches the X API v2 Activity Subscription object structure.
 type ActivitySubscription struct {
-	ID          string    `json:"id"`
-	UserID      string    `json:"user_id"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	Active      bool      `json:"active"`
+	ID        string    `json:"id"`
+	UserID    string    `json:"user_id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Active    bool      `json:"active"`
 }
 
 // Media represents a media upload in the playground.
 // Matches the X API v2 Media object structure.
 type Media struct {
-	ID               string    `json:"id"`
-	MediaKey         string    `json:"media_key"`
-	Type             string    `json:"type,omitempty"` // photo, video, animated_gif
-	State            string    `json:"state"` // initialized, processing, succeeded, failed
+	ID               string          `json:"id"`
+	MediaKey         string          `json:"media_key"`
+	Type             string          `json:"type,omitempty"` // photo, video, animated_gif
+	State            string          `json:"state"`          // initialized, processing, succeeded, failed
 	ProcessingInfo   *ProcessingInfo `json:"processing_info,omitempty"`
-	ExpiresAfterSecs int      `json:"expires_after_secs"`
-	CreatedAt        time.Time `json:"created_at"`
-	URL              string    `json:"url,omitempty"`
-	Width            int       `json:"width,omitempty"`
-	Height           int       `json:"height,omitempty"`
-	DurationMs      int       `json:"duration_ms,omitempty"` // for video
-	PreviewImageURL string    `json:"preview_image_url,omitempty"`
-	AltText          string    `json:"alt_text,omitempty"`
+	ExpiresAfterSecs int             `json:"expires_after_secs"`
+	CreatedAt        time.Time       `json:"created_at"`
+	URL              string          `json:"url,omitempty"`
+	Width            int             `json:"width,omitempty"`
+	Height           int             `json:"height,omitempty"`
+	DurationMs       int             `json:"duration_ms,omitempty"`
+	PreviewImageURL  string          `json:"preview_image_url,omitempty"`
+	AltText          string          `json:"alt_text,omitempty"`
+
+	// Internal upload state. Never exposed through the X-compatible API.
+	MimeType       string         `json:"-"`
+	TotalBytes     int64          `json:"-"`
+	UploadSegments map[int][]byte `json:"-"`
+	Content        []byte         `json:"-"`
 }
 
 // ProcessingInfo represents media processing information
@@ -498,27 +510,27 @@ func (s *State) UpdateConfig(config *PlaygroundConfig) {
 // If persistence is enabled, it will try to load state from file first
 func NewStateWithConfig(config *PlaygroundConfig) *State {
 	state := &State{
-		users:  make(map[string]*User),
-		tweets: make(map[string]*Tweet),
-		media:  make(map[string]*Media),
-		lists:  make(map[string]*List),
-		spaces: make(map[string]*Space),
-		polls:  make(map[string]*Poll),
-		places: make(map[string]*Place),
-		topics: make(map[string]*Topic),
-		nextID: 1, // Start at 1 (0 is reserved for playground user)
-		config: config, // Store config for access in handlers
-		searchStreamRules: make(map[string]*SearchStreamRule),
-		searchWebhooks:   make(map[string]*SearchWebhook),
-		dmConversations:  make(map[string]*DMConversation),
-		dmEvents:          make(map[string]*DMEvent),
-		complianceJobs:    make(map[string]*ComplianceJob),
-		communities:       make(map[string]*Community),
-		news:              make(map[string]*News),
-		notes:             make(map[string]*Note),
+		users:                 make(map[string]*User),
+		tweets:                make(map[string]*Tweet),
+		media:                 make(map[string]*Media),
+		lists:                 make(map[string]*List),
+		spaces:                make(map[string]*Space),
+		polls:                 make(map[string]*Poll),
+		places:                make(map[string]*Place),
+		topics:                make(map[string]*Topic),
+		nextID:                1,      // Start at 1 (0 is reserved for playground user)
+		config:                config, // Store config for access in handlers
+		searchStreamRules:     make(map[string]*SearchStreamRule),
+		searchWebhooks:        make(map[string]*SearchWebhook),
+		dmConversations:       make(map[string]*DMConversation),
+		dmEvents:              make(map[string]*DMEvent),
+		complianceJobs:        make(map[string]*ComplianceJob),
+		communities:           make(map[string]*Community),
+		news:                  make(map[string]*News),
+		notes:                 make(map[string]*Note),
 		activitySubscriptions: make(map[string]*ActivitySubscription),
-		personalizedTrends: make([]*PersonalizedTrend, 0),
-		streamConnections: make(map[string]map[string]context.CancelFunc),
+		personalizedTrends:    make([]*PersonalizedTrend, 0),
+		streamConnections:     make(map[string]map[string]context.CancelFunc),
 	}
 
 	// Try to load persisted state if enabled
@@ -558,7 +570,7 @@ func NewStateWithConfig(config *PlaygroundConfig) *State {
 	log.Printf("Seeding realistic data")
 	seedRealisticData(state, config)
 	log.Printf("Data seeding complete")
-	
+
 	// Ensure default user exists (in case seeding didn't create it)
 	ensureDefaultUser(state)
 
@@ -572,7 +584,7 @@ func NewStateWithConfig(config *PlaygroundConfig) *State {
 func (s *State) generateIDUnlocked() string {
 	id := s.nextID
 	s.nextID++
-	
+
 	// Handle overflow: if nextID becomes negative or wraps, reset to 1
 	// This prevents issues while maintaining uniqueness within a session
 	if s.nextID <= 0 {
@@ -580,7 +592,7 @@ func (s *State) generateIDUnlocked() string {
 		// Note: This means IDs may not be globally unique after overflow,
 		// but this is acceptable for a playground/testing environment
 	}
-	
+
 	return fmt.Sprintf("%d", id)
 }
 
@@ -599,19 +611,19 @@ func (s *State) generateSpaceIDUnlocked() string {
 	// Base62 characters: 0-9, a-z, A-Z
 	const charset = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	const length = 13
-	
+
 	// Use nextID as seed for determinism
 	seed := s.nextID
 	s.nextID++
-	
+
 	// Generate a random-looking ID but deterministic based on seed
 	id := make([]byte, length)
 	r := rand.New(rand.NewSource(int64(seed)))
-	
+
 	for i := range id {
 		id[i] = charset[r.Intn(len(charset))]
 	}
-	
+
 	return string(id)
 }
 
@@ -740,18 +752,18 @@ func (s *State) CreateTweet(text string, authorID string) *Tweet {
 	defer s.mu.Unlock()
 
 	tweet := &Tweet{
-		ID:              s.generateIDUnlocked(),
-		Text:            text,
-		AuthorID:        authorID,
-		CreatedAt:       time.Now(),
-		ConversationID:  "",
-		LikedBy:         make([]string, 0),
-		RetweetedBy:     make([]string, 0),
-		Replies:         make([]string, 0),
-		Quotes:          make([]string, 0),
-		Media:           make([]string, 0),
-		Source:          "Twitter Web App",
-		Lang:            "en",
+		ID:                s.generateIDUnlocked(),
+		Text:              text,
+		AuthorID:          authorID,
+		CreatedAt:         time.Now(),
+		ConversationID:    "",
+		LikedBy:           make([]string, 0),
+		RetweetedBy:       make([]string, 0),
+		Replies:           make([]string, 0),
+		Quotes:            make([]string, 0),
+		Media:             make([]string, 0),
+		Source:            "Twitter Web App",
+		Lang:              "en",
 		PossiblySensitive: false,
 	}
 
@@ -814,7 +826,7 @@ func (s *State) SearchTweets(ctx context.Context, query string, limit int, since
 	var results []*Tweet
 	count := 0
 	iterationCount := 0
-	
+
 	for _, tweet := range s.tweets {
 		// Check for context cancellation periodically to avoid overhead
 		if ctx != nil && iterationCount%ContextCheckIntervalMedium == 0 {
@@ -826,31 +838,31 @@ func (s *State) SearchTweets(ctx context.Context, query string, limit int, since
 			}
 		}
 		iterationCount++
-		
+
 		if count >= limit {
 			break
 		}
-		
+
 		// Filter by since_id (tweets after this ID)
 		if sinceID != "" && tweet.ID <= sinceID {
 			continue
 		}
-		
+
 		// Filter by until_id (tweets before this ID)
 		if untilID != "" && tweet.ID >= untilID {
 			continue
 		}
-		
+
 		// Filter by start_time
 		if startTime != nil && tweet.CreatedAt.Before(*startTime) {
 			continue
 		}
-		
+
 		// Filter by end_time
 		if endTime != nil && tweet.CreatedAt.After(*endTime) {
 			continue
 		}
-		
+
 		// Simple text matching - if query is empty, return all tweets (up to limit)
 		// Otherwise, match if query appears in tweet text OR author name/username (case-insensitive)
 		matches := false
@@ -862,7 +874,7 @@ func (s *State) SearchTweets(ctx context.Context, query string, limit int, since
 			if strings.Contains(strings.ToLower(tweet.Text), queryLower) {
 				matches = true
 			}
-			
+
 			// Also check author name and username (OR condition - matches if text OR author matches)
 			if !matches {
 				author := s.users[tweet.AuthorID]
@@ -874,7 +886,7 @@ func (s *State) SearchTweets(ctx context.Context, query string, limit int, since
 				}
 			}
 		}
-		
+
 		if matches {
 			results = append(results, tweet)
 			count++
@@ -953,6 +965,210 @@ func (s *State) UpdateMediaState(id string, state string, processingInfo *Proces
 		media.State = state
 		media.ProcessingInfo = processingInfo
 	}
+}
+
+// ConfigureMediaUpload stores metadata received during INITIALIZE.
+func (s *State) ConfigureMediaUpload(
+	id string,
+	mimeType string,
+	totalBytes int64,
+) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	media, exists := s.media[id]
+	if !exists {
+		return false
+	}
+
+	media.MimeType = mimeType
+	media.TotalBytes = totalBytes
+
+	if media.UploadSegments == nil {
+		media.UploadSegments = make(map[int][]byte)
+	}
+
+	return true
+}
+
+// AppendMediaSegment stores one APPEND segment.
+func (s *State) AppendMediaSegment(
+	id string,
+	segmentIndex int,
+	data []byte,
+) bool {
+	if segmentIndex < 0 {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	media, exists := s.media[id]
+	if !exists {
+		return false
+	}
+
+	if media.UploadSegments == nil {
+		media.UploadSegments = make(map[int][]byte)
+	}
+
+	// Copy because the caller's buffer may be reused after returning.
+	segmentCopy := append([]byte(nil), data...)
+	media.UploadSegments[segmentIndex] = segmentCopy
+
+	return true
+}
+
+// FinalizeMediaUpload assembles uploaded segments and makes the media usable.
+func (s *State) FinalizeMediaUpload(
+	id string,
+	publicURL string,
+) (*Media, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	media, exists := s.media[id]
+	if !exists {
+		return nil, fmt.Errorf("media %s not found", id)
+	}
+
+	if len(media.UploadSegments) == 0 {
+		return nil, fmt.Errorf("media %s has no uploaded segments", id)
+	}
+
+	segmentIndexes := make([]int, 0, len(media.UploadSegments))
+	for segmentIndex := range media.UploadSegments {
+		segmentIndexes = append(segmentIndexes, segmentIndex)
+	}
+	sort.Ints(segmentIndexes)
+
+	var buffer bytes.Buffer
+	for _, segmentIndex := range segmentIndexes {
+		buffer.Write(media.UploadSegments[segmentIndex])
+	}
+
+	payload := buffer.Bytes()
+
+	if media.TotalBytes > 0 && int64(len(payload)) != media.TotalBytes {
+		return nil, fmt.Errorf(
+			"uploaded media size mismatch: expected %d bytes, got %d",
+			media.TotalBytes,
+			len(payload),
+		)
+	}
+
+	mediaType := ""
+	width := 0
+	height := 0
+
+	switch {
+	case media.MimeType == "image/gif":
+		mediaType = "animated_gif"
+
+	case strings.HasPrefix(media.MimeType, "image/"):
+		mediaType = "photo"
+
+	case strings.HasPrefix(media.MimeType, "video/"):
+		mediaType = "video"
+
+	default:
+		return nil, fmt.Errorf(
+			"unsupported media type %q",
+			media.MimeType,
+		)
+	}
+
+	if mediaType == "photo" || mediaType == "animated_gif" {
+		config, _, err := image.DecodeConfig(bytes.NewReader(payload))
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode image metadata: %w", err)
+		}
+
+		width = config.Width
+		height = config.Height
+	}
+
+	media.Content = append([]byte(nil), payload...)
+	media.Type = mediaType
+	media.Width = width
+	media.Height = height
+	media.URL = publicURL
+
+	// Uploaded chunks are no longer required once the final content exists.
+	media.UploadSegments = nil
+
+	// Images do not need asynchronous transcoding in this mock.
+	if mediaType == "photo" || mediaType == "animated_gif" {
+		media.State = "succeeded"
+		media.ProcessingInfo = nil
+	} else {
+		media.State = "processing"
+		media.ProcessingInfo = &ProcessingInfo{
+			State:           "processing",
+			CheckAfterSecs:  1,
+			ProgressPercent: 50,
+		}
+	}
+
+	return media, nil
+}
+
+// GetMediaContentByKey returns the uploaded binary for the mock media URL.
+func (s *State) GetMediaContentByKey(
+	mediaKey string,
+) ([]byte, string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, media := range s.media {
+		if media.MediaKey != mediaKey {
+			continue
+		}
+
+		if len(media.Content) == 0 {
+			return nil, "", false
+		}
+
+		contentCopy := append([]byte(nil), media.Content...)
+		return contentCopy, media.MimeType, true
+	}
+
+	return nil, "", false
+}
+
+// AttachMediaToTweet persists the public X relationship:
+// tweet.attachments.media_keys -> media.media_key.
+func (s *State) AttachMediaToTweet(
+	tweetID string,
+	mediaIDs []string,
+) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tweet, exists := s.tweets[tweetID]
+	if !exists {
+		return false
+	}
+
+	mediaKeys := make([]string, 0, len(mediaIDs))
+
+	for _, mediaID := range mediaIDs {
+		media, exists := s.media[mediaID]
+		if !exists {
+			return false
+		}
+
+		mediaKeys = append(mediaKeys, media.MediaKey)
+	}
+
+	if tweet.Attachments == nil {
+		tweet.Attachments = &TweetAttachments{}
+	}
+
+	tweet.Attachments.MediaKeys = mediaKeys
+
+	return true
 }
 
 // GetTweets gets multiple tweets by IDs
@@ -1153,13 +1369,13 @@ func (s *State) CreateDMEvent(conversationID, senderID, eventType, text string, 
 
 	eventID := s.generateIDUnlocked()
 	event := &DMEvent{
-		ID:                eventID,
-		Text:              text,
-		SenderID:          senderID,
-		CreatedAt:         time.Now(),
-		DMConversationID:  conversationID,
-		EventType:         eventType,
-		ParticipantIDs:    participantIDs,
+		ID:               eventID,
+		Text:             text,
+		SenderID:         senderID,
+		CreatedAt:        time.Now(),
+		DMConversationID: conversationID,
+		EventType:        eventType,
+		ParticipantIDs:   participantIDs,
 	}
 	s.dmEvents[eventID] = event
 	return event
@@ -1198,7 +1414,7 @@ func (s *State) GetDMEvents(conversationID, participantID string, limit int) []*
 		}
 		events = append(events, event)
 	}
-	
+
 	// Sort by CreatedAt descending (newest first)
 	// Simple sort - could be improved
 	if len(events) > limit && limit > 0 {
@@ -1239,12 +1455,12 @@ func (s *State) CreateComplianceJob(name, jobType string) *ComplianceJob {
 
 	jobID := s.generateIDUnlocked()
 	job := &ComplianceJob{
-		ID:        jobID,
-		Name:      name,
-		Type:      jobType,
-		Status:    "in_progress",
-		CreatedAt: time.Now(),
-		UploadURL: fmt.Sprintf("https://api.twitter.com/2/compliance/jobs/%s/upload", jobID),
+		ID:              jobID,
+		Name:            name,
+		Type:            jobType,
+		Status:          "in_progress",
+		CreatedAt:       time.Now(),
+		UploadURL:       fmt.Sprintf("https://api.twitter.com/2/compliance/jobs/%s/upload", jobID),
 		UploadExpiresAt: time.Now().Add(24 * time.Hour),
 	}
 	s.complianceJobs[jobID] = job
@@ -2201,7 +2417,7 @@ func (s *State) AddListMember(listID, userID string) bool {
 
 	list.Members = append(list.Members, userID)
 	list.MemberCount++
-	
+
 	// Add to user's list memberships
 	user.ListMemberships = append(user.ListMemberships, listID)
 
@@ -2261,7 +2477,7 @@ func (s *State) FollowList(listID, userID string) bool {
 
 	list.Followers = append(list.Followers, userID)
 	list.FollowerCount++
-	
+
 	// Add to user's followed lists
 	user.FollowedLists = append(user.FollowedLists, listID)
 
@@ -2413,17 +2629,17 @@ func (s *State) SearchPlaces(query string, limit int) []*Place {
 
 	var results []*Place
 	queryLower := strings.ToLower(query)
-	
+
 	for _, place := range s.places {
 		if len(results) >= limit {
 			break
 		}
-		
+
 		// Search in name, full_name, country
 		if query == "" ||
-		   strings.Contains(strings.ToLower(place.Name), queryLower) ||
-		   strings.Contains(strings.ToLower(place.FullName), queryLower) ||
-		   strings.Contains(strings.ToLower(place.Country), queryLower) {
+			strings.Contains(strings.ToLower(place.Name), queryLower) ||
+			strings.Contains(strings.ToLower(place.FullName), queryLower) ||
+			strings.Contains(strings.ToLower(place.Country), queryLower) {
 			results = append(results, place)
 		}
 	}
@@ -2470,12 +2686,12 @@ func (s *State) SearchSpaces(query string, limit int) []*Space {
 
 	var results []*Space
 	queryLower := strings.ToLower(query)
-	
+
 	for _, space := range s.spaces {
 		if len(results) >= limit {
 			break
 		}
-		
+
 		// Search in title
 		if query == "" || strings.Contains(strings.ToLower(space.Title), queryLower) {
 			results = append(results, space)
@@ -2490,24 +2706,24 @@ func (s *State) RegisterStreamConnection(userID string, cancelFunc context.Cance
 	if s == nil {
 		return "", func() {}
 	}
-	
+
 	// Generate a unique connection ID
 	connectionID := fmt.Sprintf("%s-%d", userID, time.Now().UnixNano())
-	
+
 	s.streamConnMu.Lock()
 	defer s.streamConnMu.Unlock()
-	
+
 	// Initialize user's connection map if needed
 	if s.streamConnections[userID] == nil {
 		s.streamConnections[userID] = make(map[string]context.CancelFunc)
 	}
-	
+
 	// Register the connection
 	s.streamConnections[userID][connectionID] = cancelFunc
-	
-	log.Printf("Registered stream connection %s for user %s (total connections for user: %d)", 
+
+	log.Printf("Registered stream connection %s for user %s (total connections for user: %d)",
 		connectionID, userID, len(s.streamConnections[userID]))
-	
+
 	// Return connection ID and cleanup function
 	return connectionID, func() {
 		s.UnregisterStreamConnection(userID, connectionID)
@@ -2519,16 +2735,16 @@ func (s *State) UnregisterStreamConnection(userID, connectionID string) {
 	if s == nil {
 		return
 	}
-	
+
 	s.streamConnMu.Lock()
 	defer s.streamConnMu.Unlock()
-	
+
 	if userConnections, exists := s.streamConnections[userID]; exists {
 		if _, hasConn := userConnections[connectionID]; hasConn {
 			delete(userConnections, connectionID)
-			log.Printf("Unregistered stream connection %s for user %s (remaining connections: %d)", 
+			log.Printf("Unregistered stream connection %s for user %s (remaining connections: %d)",
 				connectionID, userID, len(userConnections))
-			
+
 			// Clean up empty user map
 			if len(userConnections) == 0 {
 				delete(s.streamConnections, userID)
@@ -2543,16 +2759,16 @@ func (s *State) CloseAllStreamConnectionsForUser(userID string) int {
 	if s == nil {
 		return 0
 	}
-	
+
 	s.streamConnMu.Lock()
 	defer s.streamConnMu.Unlock()
-	
+
 	userConnections, exists := s.streamConnections[userID]
 	if !exists || len(userConnections) == 0 {
 		log.Printf("No active stream connections found for user %s", userID)
 		return 0
 	}
-	
+
 	// Cancel all connections for this user
 	count := 0
 	for connectionID, cancelFunc := range userConnections {
@@ -2562,11 +2778,10 @@ func (s *State) CloseAllStreamConnectionsForUser(userID string) int {
 			log.Printf("Closed stream connection %s for user %s", connectionID, userID)
 		}
 	}
-	
+
 	// Clear all connections for this user
 	delete(s.streamConnections, userID)
-	
+
 	log.Printf("Closed %d stream connection(s) for user %s", count, userID)
 	return count
 }
-

@@ -478,35 +478,60 @@ func streamSearchTweets(w http.ResponseWriter, r *http.Request, state *State, qu
 	// This allows us to refresh matching tweets periodically as rules or tweets change
 	getNewMatchingTweets := func() []tweetWithRules {
 		matchingTweetsWithRules := make([]tweetWithRules, 0)
+
+		// log.Printf("DEBUG getNewMatchingTweets: before state RLock")
 		state.mu.RLock()
+		// log.Printf("DEBUG getNewMatchingTweets: acquired state RLock")
+
 		allTweets := make([]*Tweet, 0, len(state.tweets))
 		for _, t := range state.tweets {
-			// Only include tweets created AFTER stream started
 			if t.CreatedAt.After(streamStartTime) {
 				allTweets = append(allTweets, t)
 			}
 		}
+
 		state.mu.RUnlock()
-		
+		// log.Printf("DEBUG getNewMatchingTweets: released state RLock tweets=%d", len(allTweets))
+
 		for _, tweet := range allTweets {
-			// Skip tweets that have already been sent
 			if sentTweetIDs[tweet.ID] {
 				continue
 			}
-			
+
 			matchedRules := make([]*SearchStreamRule, 0)
+
 			for _, rule := range rules {
-				if ruleMatcher.MatchRule(tweet, rule.Value, state) {
+				// log.Printf(
+				// 	"DEBUG getNewMatchingTweets: before MatchRule tweet=%s rule=%s",
+				// 	tweet.ID,
+				// 	rule.ID,
+				// )
+
+				matched := ruleMatcher.MatchRule(tweet, rule.Value, state)
+
+				// log.Printf(
+				// 	"DEBUG getNewMatchingTweets: after MatchRule tweet=%s rule=%s matched=%v",
+				// 	tweet.ID,
+				// 	rule.ID,
+				// 	matched,
+				// )
+
+				if matched {
 					matchedRules = append(matchedRules, rule)
 				}
 			}
+
 			if len(matchedRules) > 0 {
-				matchingTweetsWithRules = append(matchingTweetsWithRules, tweetWithRules{
-					tweet:        tweet,
-					matchedRules: matchedRules,
-				})
+				matchingTweetsWithRules = append(
+					matchingTweetsWithRules,
+					tweetWithRules{
+						tweet:        tweet,
+						matchedRules: matchedRules,
+					},
+				)
 			}
 		}
+
 		return matchingTweetsWithRules
 	}
 
@@ -530,7 +555,9 @@ func streamSearchTweets(w http.ResponseWriter, r *http.Request, state *State, qu
 			}
 			
 			// Get only NEW matching tweets (created after stream started and not yet sent)
+			// log.Printf("DEBUG stream: before getNewMatchingTweets")
 			newMatchingTweets := getNewMatchingTweets()
+			// log.Printf("DEBUG stream: after getNewMatchingTweets count=%d", len(newMatchingTweets))
 			
 			// If no new matching tweets, send keep-alive comment and continue
 			if len(newMatchingTweets) == 0 {
@@ -550,6 +577,7 @@ func streamSearchTweets(w http.ResponseWriter, r *http.Request, state *State, qu
 				sentTweetIDs[tweetWithRules.tweet.ID] = true
 				
 				tweet := tweetWithRules.tweet
+				// log.Printf("DEBUG stream: processing tweet=%s", tweet.ID)
 
 				tweetMap := FormatTweet(tweet)
 				// Apply field filtering
@@ -582,24 +610,31 @@ func streamSearchTweets(w http.ResponseWriter, r *http.Request, state *State, qu
 				event["matching_rules"] = matchingRules
 
 				if queryParams != nil && len(queryParams.Expansions) > 0 {
+					// log.Printf("DEBUG stream: before buildExpansions tweet=%s", tweet.ID)
 					includes := buildExpansions([]*Tweet{tweet}, queryParams.Expansions, state, nil, queryParams)
+					// log.Printf("DEBUG stream: after buildExpansions tweet=%s", tweet.ID)
 					// Always add includes object (even if empty) when expansions are requested
 					// This matches real API behavior where includes is always present when requested
 					event["includes"] = includes
 				}
 
 				eventJSON, _ := json.Marshal(event)
+				// log.Printf("DEBUG stream: before write tweet=%s", tweet.ID)
 				_, err := fmt.Fprintf(w, "%s\n", eventJSON)
 				if err != nil {
 					log.Printf("Error writing to search stream: %v", err)
 					return
 				}
 				flusher.Flush()
-				
+				// log.Printf("DEBUG stream: after flush tweet=%s", tweet.ID)
+
 				// Track credit usage for each streamed tweet
 				if creditTracker != nil {
+					log.Printf("DEBUG stream: before TrackUsage tweet=%s", tweet.ID)
 					creditTracker.TrackUsage(accountID, method, path, eventJSON, http.StatusOK)
+					log.Printf("DEBUG stream: after TrackUsage tweet=%s", tweet.ID)
 				}
+				log.Printf("DEBUG stream: finished tweet=%s", tweet.ID)
 			}
 		}
 	}
