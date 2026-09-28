@@ -1139,6 +1139,29 @@ func (s *State) GetMediaContentByKey(
 
 // AttachMediaToTweet persists the public X relationship:
 // tweet.attachments.media_keys -> media.media_key.
+func (s *State) AddQuotedTweetReference(tweetID string, quotedTweetID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tweet, exists := s.tweets[tweetID]
+	if !exists {
+		return false
+	}
+
+	quoted, exists := s.tweets[quotedTweetID]
+	if !exists {
+		return false
+	}
+
+	tweet.ReferencedTweets = append(tweet.ReferencedTweets, ReferencedTweet{
+		Type: "quoted",
+		ID:   quotedTweetID,
+	})
+	quoted.Quotes = append(quoted.Quotes, tweetID)
+
+	return true
+}
+
 func (s *State) AttachMediaToTweet(
 	tweetID string,
 	mediaIDs []string,

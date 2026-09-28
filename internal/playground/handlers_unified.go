@@ -2061,8 +2061,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			return data, statusCode
 		}
 
-		// Check for mutually exclusive parameters: poll, quote_tweet_id, direct_message_deep_link, media, card_uri
-		// You can only provide one of these
+		// Check for mutually exclusive parameters: poll, quote_tweet_id, direct_message_deep_link, media, card_uri.
 		exclusiveParams := []string{"poll", "quote_tweet_id", "direct_message_deep_link", "media", "card_uri"}
 		var providedParams []string
 		paramValues := make(map[string]interface{})
@@ -2086,7 +2085,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			}
 		}
 
-		// If multiple mutually exclusive parameters are provided, return error
+		// If multiple mutually exclusive parameters are provided, return error.
 		if len(providedParams) > 1 {
 			errorResp := CreateMutuallyExclusiveErrorResponse(
 				paramValues,
@@ -2172,8 +2171,10 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 		}
 
 		// Validate quote_tweet_id if provided
+		quoteTweetID := ""
 		if quoteTweetIDVal, exists := reqBody["quote_tweet_id"]; exists {
-			if quoteTweetID, ok := idValueToString(quoteTweetIDVal); ok {
+			if parsedQuoteTweetID, ok := idValueToString(quoteTweetIDVal); ok {
+				quoteTweetID = parsedQuoteTweetID
 				if state.GetTweet(quoteTweetID) == nil {
 					errorResp := CreateMutuallyExclusiveErrorResponse(
 						map[string]interface{}{
@@ -2294,6 +2295,18 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			)
 			data, statusCode := MarshalJSONErrorResponse(errorResp)
 			return data, statusCode
+		}
+
+		if quoteTweetID != "" {
+			if !state.AddQuotedTweetReference(tweet.ID, quoteTweetID) {
+				errorResp := CreateValidationErrorResponse(
+					"quote_tweet_id",
+					quoteTweetID,
+					"failed to attach quoted tweet reference",
+				)
+				data, statusCode := MarshalJSONErrorResponse(errorResp)
+				return data, statusCode
+			}
 		}
 
 		if len(mediaIDs) > 0 {

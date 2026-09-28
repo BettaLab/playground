@@ -18,13 +18,12 @@ import (
 	"time"
 )
 
-
 // handleUserRelationshipEndpoints handles user relationship endpoints
 func handleUserRelationshipEndpoints(path, method string, r *http.Request, state *State, spec *OpenAPISpec, queryParams *QueryParams, op *Operation, pathItem *PathItem) ([]byte, int) {
 	// Normalize path: remove query parameters and trailing slashes
 	normalizedPath := strings.Split(path, "?")[0]
 	normalizedPath = strings.TrimSuffix(normalizedPath, "/")
-	
+
 	// GET /2/users/{id}/tweets
 	if method == "GET" && strings.Contains(normalizedPath, "/users/") && (strings.HasSuffix(normalizedPath, "/tweets") || normalizedPath == "/2/users/tweets") {
 		userID := extractUserIDFromPath(normalizedPath, "/tweets")
@@ -75,7 +74,7 @@ func handleUserRelationshipEndpoints(path, method string, r *http.Request, state
 				for _, followingID := range user.Following {
 					followingSet[followingID] = true
 				}
-				
+
 				// Get all tweets and filter by author ID
 				state.mu.RLock()
 				timelineTweets := make([]*Tweet, 0)
@@ -85,7 +84,7 @@ func handleUserRelationshipEndpoints(path, method string, r *http.Request, state
 					}
 				}
 				state.mu.RUnlock()
-				
+
 				// Apply time filtering
 				timelineTweets = filterTweetsByTime(timelineTweets, r)
 				// Sort by created_at descending (newest first - reverse chronological)
@@ -186,12 +185,12 @@ func handleUserRelationshipEndpoints(path, method string, r *http.Request, state
 		if len(parts) == 2 {
 			sourceID := extractUserIDFromPath(parts[0], "")
 			targetID := parts[1]
-			
+
 			sourceUser := state.GetUserByID(sourceID)
 			if sourceUser == nil {
 				sourceUser = state.GetUserByUsername(sourceID)
 			}
-			
+
 			if sourceUser != nil {
 				following := false
 				for _, id := range sourceUser.Following {
@@ -200,7 +199,7 @@ func handleUserRelationshipEndpoints(path, method string, r *http.Request, state
 						break
 					}
 				}
-				
+
 				response := map[string]interface{}{
 					"data": map[string]bool{
 						"following": following,
@@ -380,17 +379,17 @@ func formatResourceNotFoundError(resourceType, parameter, resourceID string) []b
 		"errors": []map[string]interface{}{
 			{
 				"value":         resourceID,
-				"detail":       fmt.Sprintf("Could not find %s with %s: [%s].", resourceType, parameter, resourceID),
-				"title":        "Not Found Error",
+				"detail":        fmt.Sprintf("Could not find %s with %s: [%s].", resourceType, parameter, resourceID),
+				"title":         "Not Found Error",
 				"resource_type": resourceType,
 				"parameter":     parameter,
-				"resource_id":  resourceID,
-				"type":         "https://api.twitter.com/2/problems/resource-not-found",
-				"code":         50, // X API error code 50 = Not Found
+				"resource_id":   resourceID,
+				"type":          "https://api.twitter.com/2/problems/resource-not-found",
+				"code":          50, // X API error code 50 = Not Found
 			},
 		},
 	}
-	
+
 	data, _ := MarshalJSONErrorResponse(errorResponse)
 	return data
 }
@@ -408,8 +407,8 @@ func handleTweetRelationshipEndpoints(path, method string, r *http.Request, stat
 			if tweetID != "" {
 				tweet := state.GetTweet(tweetID)
 				if tweet != nil {
-				users := state.GetUsers(tweet.LikedBy)
-				users, nextToken, err := applyUserPagination(users, r, op, spec, pathItem)
+					users := state.GetUsers(tweet.LikedBy)
+					users, nextToken, err := applyUserPagination(users, r, op, spec, pathItem)
 					if err != nil {
 						errorResp := CreateValidationErrorResponse("max_results", r.URL.Query().Get("max_results"), err.Error())
 						data, _ := MarshalJSONErrorResponse(errorResp)
@@ -588,9 +587,9 @@ func applyPaginationGeneric[T any](items []T, r *http.Request, op *Operation, sp
 		default:
 		}
 	}
-	
+
 	_, max, defaultValue, found := GetMaxResultsLimits(op, spec, pathItem)
-	
+
 	// Determine default and max values
 	defaultMaxResults := 10
 	maxMaxResults := 100
@@ -602,7 +601,7 @@ func applyPaginationGeneric[T any](items []T, r *http.Request, op *Operation, sp
 			maxMaxResults = max
 		}
 	}
-	
+
 	maxResults := defaultMaxResults
 	if maxStr := r.URL.Query().Get("max_results"); maxStr != "" {
 		val, err := strconv.Atoi(maxStr)
@@ -630,7 +629,7 @@ func applyPaginationGeneric[T any](items []T, r *http.Request, op *Operation, sp
 		if len(paginationToken) > 1000 {
 			return nil, "", fmt.Errorf("pagination_token is too long")
 		}
-		
+
 		// Try to parse as base64-encoded token first (realistic format)
 		if idx, err := decodePaginationToken(paginationToken); err == nil {
 			// Validate decoded index is non-negative
@@ -653,7 +652,7 @@ func applyPaginationGeneric[T any](items []T, r *http.Request, op *Operation, sp
 
 	var nextToken string
 	totalItems := len(items)
-	
+
 	// Bounds checking: ensure startIdx is within valid range
 	if startIdx < 0 {
 		startIdx = 0
@@ -724,10 +723,10 @@ func findMentions(ctx context.Context, username string, state *State) []*Tweet {
 	mention := "@" + username
 	var results []*Tweet
 	iterationCount := 0
-	
+
 	state.mu.RLock()
 	defer state.mu.RUnlock()
-	
+
 	for _, tweet := range state.tweets {
 		// Check for context cancellation periodically
 		if ctx != nil && iterationCount%ContextCheckIntervalMedium == 0 {
@@ -739,12 +738,12 @@ func findMentions(ctx context.Context, username string, state *State) []*Tweet {
 			}
 		}
 		iterationCount++
-		
+
 		if strings.Contains(strings.ToLower(tweet.Text), strings.ToLower(mention)) {
 			results = append(results, tweet)
 		}
 	}
-	
+
 	return results
 }
 
@@ -753,7 +752,7 @@ func filterTweetsByTime(tweets []*Tweet, r *http.Request) []*Tweet {
 	sinceID := r.URL.Query().Get("since_id")
 	untilID := r.URL.Query().Get("until_id")
 	var startTime, endTime *time.Time
-	
+
 	if startTimeStr := r.URL.Query().Get("start_time"); startTimeStr != "" {
 		if t, err := time.Parse(time.RFC3339, startTimeStr); err == nil {
 			startTime = &t
@@ -764,36 +763,36 @@ func filterTweetsByTime(tweets []*Tweet, r *http.Request) []*Tweet {
 			endTime = &t
 		}
 	}
-	
+
 	if sinceID == "" && untilID == "" && startTime == nil && endTime == nil {
 		return tweets // No filtering needed
 	}
-	
+
 	var filtered []*Tweet
 	for _, tweet := range tweets {
 		// Filter by since_id (tweets after this ID)
 		if sinceID != "" && tweet.ID <= sinceID {
 			continue
 		}
-		
+
 		// Filter by until_id (tweets before this ID)
 		if untilID != "" && tweet.ID >= untilID {
 			continue
 		}
-		
+
 		// Filter by start_time
 		if startTime != nil && tweet.CreatedAt.Before(*startTime) {
 			continue
 		}
-		
+
 		// Filter by end_time
 		if endTime != nil && tweet.CreatedAt.After(*endTime) {
 			continue
 		}
-		
+
 		filtered = append(filtered, tweet)
 	}
-	
+
 	return filtered
 }
 
@@ -917,9 +916,9 @@ func formatList(list *List) map[string]interface{} {
 	return map[string]interface{}{
 		"id":             list.ID,
 		"name":           list.Name,
-		"description":   list.Description,
+		"description":    list.Description,
 		"created_at":     list.CreatedAt.Format(time.RFC3339),
-		"private":       list.Private,
+		"private":        list.Private,
 		"follower_count": list.FollowerCount,
 		"member_count":   list.MemberCount,
 		"owner_id":       list.OwnerID,
@@ -929,11 +928,11 @@ func formatList(list *List) map[string]interface{} {
 // formatSpace formats a space for response
 func formatSpace(space *Space) map[string]interface{} {
 	result := map[string]interface{}{
-		"id":    space.ID,
-		"state": space.State,
+		"id":         space.ID,
+		"state":      space.State,
 		"created_at": space.CreatedAt.Format(time.RFC3339),
 	}
-	
+
 	if space.Title != "" {
 		result["title"] = space.Title
 	}
@@ -970,19 +969,19 @@ func formatSpace(space *Space) map[string]interface{} {
 	if space.Lang != "" {
 		result["lang"] = space.Lang
 	}
-	
+
 	return result
 }
 
 // buildExpansions builds the includes object for expansions
 func buildExpansions(tweets []*Tweet, expansions []string, state *State, spec *OpenAPISpec, queryParams *QueryParams) map[string]interface{} {
 	includes := make(map[string]interface{})
-	
+
 	// Return empty includes if state is nil (prevents nil pointer dereference)
 	if state == nil {
 		return includes
 	}
-	
+
 	for _, exp := range expansions {
 		switch exp {
 		case "author_id":
@@ -1133,6 +1132,7 @@ func buildExpansions(tweets []*Tweet, expansions []string, state *State, spec *O
 						refTweet := state.GetTweet(ref.ID)
 						if refTweet != nil {
 							tweetMap := FormatTweet(refTweet)
+							addExpansionFieldsToTweet(tweetMap, refTweet, expansions)
 							// Apply field filtering if specified
 							if queryParams != nil && len(queryParams.TweetFields) > 0 {
 								tweetMap = filterTweetFields(tweetMap, queryParams.TweetFields)
@@ -1148,6 +1148,82 @@ func buildExpansions(tweets []*Tweet, expansions []string, state *State, spec *O
 			}
 			if len(referencedTweets) > 0 {
 				includes["tweets"] = referencedTweets
+			}
+		case "referenced_tweets.id.author_id":
+			users := make([]map[string]interface{}, 0)
+			seenUsers := make(map[string]bool)
+			if existingUsers, ok := includes["users"].([]map[string]interface{}); ok {
+				for _, userMap := range existingUsers {
+					if id, ok := userMap["id"].(string); ok {
+						seenUsers[id] = true
+					}
+				}
+				users = append(users, existingUsers...)
+			}
+			for _, tweet := range tweets {
+				for _, ref := range tweet.ReferencedTweets {
+					refTweet := state.GetTweet(ref.ID)
+					if refTweet == nil || seenUsers[refTweet.AuthorID] {
+						continue
+					}
+					user := state.GetUserByID(refTweet.AuthorID)
+					if user == nil {
+						continue
+					}
+					userMap := FormatUser(user)
+					if queryParams != nil && len(queryParams.UserFields) > 0 {
+						userMap = filterUserFields(userMap, queryParams.UserFields)
+					} else {
+						userMap = filterUserFields(userMap, []string{"id", "name", "username"})
+					}
+					users = append(users, userMap)
+					seenUsers[user.ID] = true
+				}
+			}
+			if len(users) > 0 {
+				includes["users"] = users
+			}
+		case "referenced_tweets.id.attachments.media_keys":
+			media := make([]map[string]interface{}, 0)
+			seenMedia := make(map[string]bool)
+			if existingMedia, ok := includes["media"].([]map[string]interface{}); ok {
+				for _, mediaMap := range existingMedia {
+					if mediaKey, ok := mediaMap["media_key"].(string); ok {
+						seenMedia[mediaKey] = true
+					}
+				}
+				media = append(media, existingMedia...)
+			}
+			for _, tweet := range tweets {
+				for _, ref := range tweet.ReferencedTweets {
+					refTweet := state.GetTweet(ref.ID)
+					if refTweet == nil || refTweet.Attachments == nil {
+						continue
+					}
+					for _, mediaKey := range refTweet.Attachments.MediaKeys {
+						if seenMedia[mediaKey] {
+							continue
+						}
+						state.mu.RLock()
+						for _, m := range state.media {
+							if m.MediaKey == mediaKey {
+								mediaMap := formatMediaForExpansion(m)
+								if queryParams != nil && len(queryParams.MediaFields) > 0 {
+									mediaMap = filterMediaFields(mediaMap, queryParams.MediaFields)
+								} else {
+									mediaMap = filterMediaFields(mediaMap, []string{"media_key", "type"})
+								}
+								media = append(media, mediaMap)
+								seenMedia[mediaKey] = true
+								break
+							}
+						}
+						state.mu.RUnlock()
+					}
+				}
+			}
+			if len(media) > 0 {
+				includes["media"] = media
 			}
 		case "in_reply_to_user_id":
 			users := make([]map[string]interface{}, 0)
@@ -1191,14 +1267,14 @@ func buildExpansions(tweets []*Tweet, expansions []string, state *State, spec *O
 			}
 		}
 	}
-	
+
 	return includes
 }
 
 // buildUserExpansions builds the includes section for user endpoints
 func buildUserExpansions(users []*User, expansions []string, state *State, spec *OpenAPISpec, queryParams *QueryParams) map[string]interface{} {
 	includes := make(map[string]interface{})
-	
+
 	for _, exp := range expansions {
 		switch exp {
 		case "pinned_tweet_id":
@@ -1226,7 +1302,7 @@ func buildUserExpansions(users []*User, expansions []string, state *State, spec 
 			}
 		}
 	}
-	
+
 	return includes
 }
 
@@ -1235,42 +1311,42 @@ func buildUserExpansions(users []*User, expansions []string, state *State, spec 
 func filterTweetFields(tweet map[string]interface{}, fields []string) map[string]interface{} {
 	filtered := make(map[string]interface{})
 	fieldMap := make(map[string]bool)
-	
+
 	// X API always includes default fields (id, text, edit_history_tweet_ids) even when tweet.fields is specified
 	defaultFields := []string{"id", "text", "edit_history_tweet_ids"}
 	for _, f := range defaultFields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	// Add requested fields
 	for _, f := range fields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	for key, value := range tweet {
 		if fieldMap[key] {
 			filtered[key] = value
 		}
 	}
-	
+
 	return filtered
 }
 
 func filterUserFields(user map[string]interface{}, fields []string) map[string]interface{} {
 	filtered := make(map[string]interface{})
 	fieldMap := make(map[string]bool)
-	
+
 	// X API always includes default fields (id, name, username) even when user.fields is specified
 	defaultFields := []string{"id", "name", "username"}
 	for _, f := range defaultFields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	// Add requested fields
 	for _, f := range fields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	for key, value := range user {
 		if fieldMap[key] {
 			// Match X API behavior: omit null/empty values even when explicitly requested
@@ -1284,40 +1360,40 @@ func filterUserFields(user map[string]interface{}, fields []string) map[string]i
 			filtered[key] = value
 		}
 	}
-	
+
 	return filtered
 }
 
 func filterListFields(list map[string]interface{}, fields []string) map[string]interface{} {
 	filtered := make(map[string]interface{})
 	fieldMap := make(map[string]bool)
-	
+
 	// X API always includes default fields (id, name) even when list.fields is specified
 	defaultFields := []string{"id", "name"}
 	for _, f := range defaultFields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	// Add requested fields
 	for _, f := range fields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	for key, value := range list {
 		if fieldMap[key] {
 			filtered[key] = value
 		}
 	}
-	
+
 	return filtered
 }
 
 // formatCommunity formats a community for response
 func formatCommunity(community *Community) map[string]interface{} {
 	result := map[string]interface{}{
-		"id":          community.ID,
-		"name":        community.Name,
-		"created_at":  community.CreatedAt.Format(time.RFC3339),
+		"id":         community.ID,
+		"name":       community.Name,
+		"created_at": community.CreatedAt.Format(time.RFC3339),
 	}
 	if community.Description != "" {
 		result["description"] = community.Description
@@ -1335,120 +1411,120 @@ func formatCommunity(community *Community) map[string]interface{} {
 func filterCommunityFields(community map[string]interface{}, fields []string) map[string]interface{} {
 	filtered := make(map[string]interface{})
 	fieldMap := make(map[string]bool)
-	
+
 	// X API always includes default fields (id, name) even when community.fields is specified
 	defaultFields := []string{"id", "name"}
 	for _, f := range defaultFields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	// Add requested fields
 	for _, f := range fields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	for key, value := range community {
 		if fieldMap[key] {
 			filtered[key] = value
 		}
 	}
-	
+
 	return filtered
 }
 
 func filterMediaFields(media map[string]interface{}, fields []string) map[string]interface{} {
 	filtered := make(map[string]interface{})
 	fieldMap := make(map[string]bool)
-	
+
 	// X API always includes default fields (media_key, type) even when media.fields is specified
 	defaultFields := []string{"media_key", "type"}
 	for _, f := range defaultFields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	// Add requested fields
 	for _, f := range fields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	for key, value := range media {
 		if fieldMap[key] {
 			filtered[key] = value
 		}
 	}
-	
+
 	return filtered
 }
 
 func filterPollFields(poll map[string]interface{}, fields []string) map[string]interface{} {
 	filtered := make(map[string]interface{})
 	fieldMap := make(map[string]bool)
-	
+
 	// X API always includes default fields (id, options) even when poll.fields is specified
 	defaultFields := []string{"id", "options"}
 	for _, f := range defaultFields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	// Add requested fields
 	for _, f := range fields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	for key, value := range poll {
 		if fieldMap[key] {
 			filtered[key] = value
 		}
 	}
-	
+
 	return filtered
 }
 
 func filterSpaceFields(space map[string]interface{}, fields []string) map[string]interface{} {
 	filtered := make(map[string]interface{})
 	fieldMap := make(map[string]bool)
-	
+
 	// X API always includes default fields (id, state) even when space.fields is specified
 	defaultFields := []string{"id", "state"}
 	for _, f := range defaultFields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	// Add requested fields
 	for _, f := range fields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	for key, value := range space {
 		if fieldMap[key] {
 			filtered[key] = value
 		}
 	}
-	
+
 	return filtered
 }
 
 func filterPlaceFields(place map[string]interface{}, fields []string) map[string]interface{} {
 	filtered := make(map[string]interface{})
 	fieldMap := make(map[string]bool)
-	
+
 	// X API always includes default fields (id, full_name) even when place.fields is specified
 	defaultFields := []string{"id", "full_name"}
 	for _, f := range defaultFields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	// Add requested fields
 	for _, f := range fields {
 		fieldMap[strings.TrimSpace(f)] = true
 	}
-	
+
 	for key, value := range place {
 		if fieldMap[key] {
 			filtered[key] = value
 		}
 	}
-	
+
 	return filtered
 }
 
@@ -1462,7 +1538,7 @@ func formatPoll(poll *Poll) map[string]interface{} {
 			"votes":    opt.Votes,
 		}
 	}
-	
+
 	return map[string]interface{}{
 		"id":               poll.ID,
 		"options":          options,
@@ -1480,18 +1556,17 @@ func formatMediaForExpansion(media *Media) map[string]interface{} {
 // formatPlace formats a place for response
 func formatPlace(place *Place) map[string]interface{} {
 	result := map[string]interface{}{
-		"id":          place.ID,
-		"full_name":   place.FullName,
-		"name":        place.Name,
-		"country":     place.Country,
+		"id":           place.ID,
+		"full_name":    place.FullName,
+		"name":         place.Name,
+		"country":      place.Country,
 		"country_code": place.CountryCode,
-		"place_type":  place.PlaceType,
+		"place_type":   place.PlaceType,
 	}
-	
+
 	if len(place.Geo.Coordinates) > 0 {
 		result["geo"] = place.Geo
 	}
-	
+
 	return result
 }
-
