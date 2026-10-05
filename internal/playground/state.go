@@ -257,6 +257,29 @@ type TweetMetrics struct {
 	ImpressionCount int `json:"impression_count"` // Always include (even if 0) to match real API
 }
 
+// Validate rejects metric states that X public metrics cannot represent.
+func (m TweetMetrics) Validate() error {
+	if m.RetweetCount < 0 {
+		return fmt.Errorf("retweet_count must be a non-negative integer")
+	}
+	if m.LikeCount < 0 {
+		return fmt.Errorf("like_count must be a non-negative integer")
+	}
+	if m.ReplyCount < 0 {
+		return fmt.Errorf("reply_count must be a non-negative integer")
+	}
+	if m.QuoteCount < 0 {
+		return fmt.Errorf("quote_count must be a non-negative integer")
+	}
+	if m.BookmarkCount < 0 {
+		return fmt.Errorf("bookmark_count must be a non-negative integer")
+	}
+	if m.ImpressionCount < 0 {
+		return fmt.Errorf("impression_count must be a non-negative integer")
+	}
+	return nil
+}
+
 // List represents a list in the playground.
 // Matches the X API v2 List object structure.
 type List struct {
@@ -792,6 +815,26 @@ func (s *State) GetTweet(id string) *Tweet {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.tweets[id]
+}
+
+// SetPostMetrics replaces the current public metrics for an existing tweet.
+// It is an internal Playground state operation and intentionally does not emit
+// stream events, create posts, increment existing counters, or persist history.
+func (s *State) SetPostMetrics(postID string, metrics TweetMetrics) error {
+	if err := metrics.Validate(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tweet := s.tweets[postID]
+	if tweet == nil {
+		return fmt.Errorf("post %s not found", postID)
+	}
+
+	tweet.PublicMetrics = metrics
+	return nil
 }
 
 // DeleteTweet deletes a tweet

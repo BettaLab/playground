@@ -2653,9 +2653,51 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 				}
 				return data, http.StatusBadRequest
 			}
-			tweets := state.GetTweets(ids)
-			// Format as array response
-			return formatStateDataToOpenAPI(tweets, op, spec, queryParams, state), http.StatusOK
+			response := map[string]interface{}{}
+			dataItems := make([]map[string]interface{}, 0, len(ids))
+			errors := make([]map[string]interface{}, 0)
+
+			for _, id := range ids {
+				id = strings.TrimSpace(id)
+				tweet := state.GetTweet(id)
+				if tweet == nil {
+					errors = append(errors, map[string]interface{}{
+						"value":         id,
+						"detail":        fmt.Sprintf("Could not find tweet with ids: [%s].", id),
+						"title":         "Not Found Error",
+						"resource_type": "tweet",
+						"parameter":     "ids",
+						"resource_id":   id,
+						"type":          "https://api.twitter.com/2/problems/resource-not-found",
+					})
+					continue
+				}
+
+				tweetMap := FormatTweet(tweet)
+				if queryParams != nil {
+					if len(queryParams.TweetFields) > 0 {
+						tweetMap = filterTweetFields(tweetMap, queryParams.TweetFields)
+					} else {
+						tweetMap = filterTweetFields(tweetMap, []string{"id", "text"})
+					}
+				} else {
+					tweetMap = filterTweetFields(tweetMap, []string{"id", "text"})
+				}
+				dataItems = append(dataItems, tweetMap)
+			}
+
+			if len(dataItems) > 0 {
+				response["data"] = dataItems
+			}
+			if len(errors) > 0 {
+				response["errors"] = errors
+			}
+			response["meta"] = map[string]interface{}{
+				"result_count": len(dataItems),
+			}
+
+			data, statusCode := MarshalJSONResponse(response)
+			return data, statusCode
 		}
 	}
 
