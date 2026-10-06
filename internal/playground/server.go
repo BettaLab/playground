@@ -14,19 +14,21 @@
 //   - CORS support for web applications
 //
 // Architecture:
-//   The playground uses a unified OpenAPI handler that processes all API requests,
-//   validates them against the OpenAPI specification, and generates appropriate responses.
-//   Stateful operations (creating tweets, following users, etc.) are handled by the State
-//   type, which maintains in-memory data structures. The playground can optionally
-//   persist state to disk for restoration across restarts.
+//
+//	The playground uses a unified OpenAPI handler that processes all API requests,
+//	validates them against the OpenAPI specification, and generates appropriate responses.
+//	Stateful operations (creating tweets, following users, etc.) are handled by the State
+//	type, which maintains in-memory data structures. The playground can optionally
+//	persist state to disk for restoration across restarts.
 //
 // Usage:
-//   Start the playground server:
-//     server := playground.NewServer(8080, "localhost")
-//     server.Start()
 //
-//   Make API requests:
-//     curl -H "Authorization: Bearer test_token" http://localhost:8080/2/users/me
+//	Start the playground server:
+//	  server := playground.NewServer(8080, "localhost")
+//	  server.Start()
+//
+//	Make API requests:
+//	  curl -H "Authorization: Bearer test_token" http://localhost:8080/2/users/me
 //
 // Conventions:
 //   - Exported functions use PascalCase (e.g., GenerateUserResponse)
@@ -50,14 +52,14 @@ import (
 // Server represents the playground API server.
 // It manages HTTP server lifecycle, state, examples, and persistence.
 type Server struct {
-	httpServer   *http.Server
-	state        *State
-	examples     *ExampleStore
-	persistence  *StatePersistence
+	httpServer    *http.Server
+	state         *State
+	examples      *ExampleStore
+	persistence   *StatePersistence
 	creditTracker *CreditTracker
-	port         int
-	host         string
-	activeReqs   int64 // Track active requests (atomic)
+	port          int
+	host          string
+	activeReqs    int64 // Track active requests (atomic)
 }
 
 // NewServer creates a new playground server.
@@ -83,7 +85,7 @@ func NewServerWithRefresh(port int, host string, refreshCache bool) *Server {
 
 	examples := NewExampleStore()
 	creditTracker := NewCreditTracker()
-	
+
 	// Initialize persistence if enabled
 	var persistence *StatePersistence
 	if config != nil {
@@ -101,7 +103,7 @@ func NewServerWithRefresh(port int, host string, refreshCache bool) *Server {
 			// Create persistence with credit tracker reference
 			persistence = NewStatePersistenceWithCredits(state, persistenceConfig, creditTracker)
 			if persistence != nil {
-				log.Printf("State persistence enabled: %s (auto-save: %v, interval: %ds)", 
+				log.Printf("State persistence enabled: %s (auto-save: %v, interval: %ds)",
 					persistenceConfig.FilePath, persistenceConfig.AutoSave, persistenceConfig.SaveInterval)
 			}
 		}
@@ -136,7 +138,7 @@ func NewServerWithRefresh(port int, host string, refreshCache bool) *Server {
 	}
 
 	SetGlobalConfig(config)
-	
+
 	addr := fmt.Sprintf("%s:%d", host, port)
 	httpServer := &http.Server{
 		Addr:         addr,
@@ -145,44 +147,47 @@ func NewServerWithRefresh(port int, host string, refreshCache bool) *Server {
 		WriteTimeout: 0, // Disable write timeout to support streaming endpoints
 		IdleTimeout:  60 * time.Second,
 	}
-	
+
 	// Create server instance first (with nil handler, will be set later)
 	server := &Server{
-		httpServer:   httpServer,
-		state:        state,
-		examples:     examples,
-		persistence:  persistence,
+		httpServer:    httpServer,
+		state:         state,
+		examples:      examples,
+		persistence:   persistence,
 		creditTracker: creditTracker,
-		port:         port,
-		host:         host,
-		activeReqs:   0,
+		port:          port,
+		host:          host,
+		activeReqs:    0,
 	}
-	
+
 	// Setup HTTP handlers
 	mux.HandleFunc("/playground", HandleUI)
 	mux.HandleFunc("/playground/", HandleUI)
-	
+
+	// Add Playground-only test/control endpoints (before X-compatible handlers)
+	mux.HandleFunc("/__playground/tweets/", HandlePostMetricsControl(state))
+
 	// Add health check endpoint (before other handlers)
 	mux.HandleFunc("/health", HandleHealth)
-	
+
 	// Add rate limit status endpoint (before other handlers)
 	mux.HandleFunc("/rate-limits", HandleRateLimitStatus)
-	
+
 	// Add endpoints list endpoint
 	mux.HandleFunc("/endpoints", HandleEndpointsList(spec))
-	
+
 	// Add configuration management endpoints
 	mux.HandleFunc("/config", HandleConfigGet)
 	mux.HandleFunc("/config/update", HandleConfigUpdate)
 	mux.HandleFunc("/config/save", HandleConfigSave)
-	
+
 	// Add state management endpoints
 	mux.HandleFunc("/state/reset", HandleStateReset(state, persistence))
 	mux.HandleFunc("/state", HandleStateDelete(state, persistence))
 	mux.HandleFunc("/state/export", HandleStateExport(state))
 	mux.HandleFunc("/state/import", HandleStateImport(state, persistence))
 	mux.HandleFunc("/state/save", HandleStateSave(persistence))
-	
+
 	// Add credit tracking endpoints
 	mux.HandleFunc("/api/credits/pricing", HandleCreditsPricing(creditTracker))
 	// Note: HandleAccountUsage handles /api/accounts/{id}/usage and HandleAccountCost handles /api/accounts/{id}/cost
@@ -197,7 +202,7 @@ func NewServerWithRefresh(port int, host string, refreshCache bool) *Server {
 			WriteError(w, http.StatusNotFound, "Not found. Use /api/accounts/{id}/usage or /api/accounts/{id}/cost", 404)
 		}
 	})
-	
+
 	// Setup handlers (includes CORS handling in unified handler)
 	SetupHandlers(mux, state, spec, examples, server)
 
@@ -218,14 +223,14 @@ func (s *Server) Start() error {
 	log.Printf("Supported endpoints: All X API v2 endpoints from OpenAPI spec")
 	log.Printf("Management endpoints: /health, /rate-limits, /config, /state")
 	log.Printf("Credit tracking endpoints: /api/credits/pricing, /api/accounts/{id}/usage")
-	
+
 	if s.persistence != nil {
-		log.Printf("State persistence: ENABLED (file: %s, auto-save: %v, interval: %ds)", 
+		log.Printf("State persistence: ENABLED (file: %s, auto-save: %v, interval: %ds)",
 			s.persistence.config.FilePath, s.persistence.config.AutoSave, s.persistence.config.SaveInterval)
 	} else {
 		log.Printf("State persistence: DISABLED")
 	}
-	
+
 	log.Printf("Web UI: %s/playground", addr)
 	log.Printf("Set API_BASE_URL=%s to use the playground", addr)
 
@@ -237,15 +242,15 @@ func (s *Server) Start() error {
 // Returns an error if shutdown fails.
 func (s *Server) Stop(ctx context.Context) error {
 	log.Println("Stopping playground server...")
-	
+
 	// Wait for active requests to complete (with timeout)
 	// Check active requests every 100ms
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-	
+
 	timeout := 30 * time.Second
 	deadline := time.Now().Add(timeout)
-	
+
 	forceShutdown := false
 	for atomic.LoadInt64(&s.activeReqs) > 0 && time.Now().Before(deadline) && !forceShutdown {
 		select {
@@ -259,11 +264,11 @@ func (s *Server) Stop(ctx context.Context) error {
 			}
 		}
 	}
-	
+
 	if atomic.LoadInt64(&s.activeReqs) > 0 {
 		log.Printf("Warning: %d active request(s) still in progress, proceeding with shutdown", atomic.LoadInt64(&s.activeReqs))
 	}
-	
+
 	// Save state if persistence is enabled (includes credit tracking data)
 	if s.persistence != nil {
 		if err := s.persistence.Stop(); err != nil {
@@ -272,7 +277,7 @@ func (s *Server) Stop(ctx context.Context) error {
 			log.Printf("State saved successfully (including credit tracking data)")
 		}
 	}
-	
+
 	return s.httpServer.Shutdown(ctx)
 }
 
@@ -287,4 +292,3 @@ func (s *Server) GetURL() string {
 func (s *Server) GetState() *State {
 	return s.state
 }
-
