@@ -2,9 +2,50 @@
 
 A standalone local HTTP server that simulates the X API v2 for testing and development without consuming API credits.
 
+## X API compatibility contract (Atalaya fork)
+
+**Non-negotiable:** The goal is to replace this simulator with the official X API
+by changing the API base URL and credentials, **without changing Atalaya's API
+client, requests, response parsing, or business logic**. The `/2/` HTTP surface
+is an X API compatibility boundary, not a custom Playground API.
+
+- Preserve documented X API paths, HTTP methods, query parameters, request
+  bodies, authentication, response status codes, JSON shapes, error envelopes,
+  and streaming/matching semantics. The provider's behavior is authoritative.
+- Never introduce Playground-only fields, headers, query parameters, response
+  attributes, or shortcuts in `/2/` that callers must use or interpret. A
+  simulator implementation detail must not become an Atalaya dependency.
+- Internal extensions are welcome: deterministic fixtures, seeds, state
+  persistence, simulated time/rate limits, inspection tools, and management
+  endpoints **outside `/2/`**. Configure simulation controls separately from
+  the X-compatible request contract; their effects must still produce responses
+  consistent with X API semantics.
+- Before changing an X-compatible endpoint, consult the **current official X
+  documentation** and, where available, sanitized real-provider observations.
+  Add contract-focused tests for requests, success/error responses, dry runs,
+  limits, and stream events relevant to the change. A passing simulator test
+  alone does not prove compatibility with X.
+- If X behavior cannot be reproduced or verified, document the discrepancy,
+  avoid presenting the simulated behavior as authoritative, and do not add
+  application-side workarounds that would break when switching to the real API.
+
+Official reference endpoints for the current rule-management work:
+
+- [Get stream rules](https://docs.x.com/x-api/stream/get-stream-rules)
+- [Update stream rules](https://docs.x.com/x-api/stream/update-stream-rules)
+- [Get rule counts](https://docs.x.com/x-api/stream/get-stream-rule-counts)
+
+**Known gaps requiring contract verification (Filtered Stream rules):** The
+current `GET /2/tweets/search/stream/rules` implementation does not honor
+`ids`, `max_results`, or `pagination_token`; `POST .../rules?dry_run=true`
+currently adds `meta.dry_run` to its response even though that field is not
+part of the documented response shape. Expression validation is intentionally
+partial. Do not make Atalaya rely on these differences. Resolve compatibility
+gaps against official documentation/provider evidence before claiming parity.
+
 ## Features
 
-- Complete API compatibility with X API v2 endpoints
+- X API v2-shaped endpoints for local simulation (per-endpoint compatibility must be verified)
 - Stateful operations with in-memory state management
 - Optional file-based state persistence across server restarts
 - Interactive web UI for exploring and testing endpoints
@@ -113,9 +154,12 @@ Configuration files are stored in `~/.playground/`:
 
 ### Filtered Stream rule simulation
 
-The X-compatible rule endpoints support deterministic GET, batched add,
+The X-compatible rule endpoints implement the documented listing and mutation
+surface: GET filtering by comma-separated numeric `ids`, `max_results` from 1
+to 1,000, opaque 16-character base32hex `pagination_token` cursors, batched add,
 targeted delete by provider ID or exact value, `?delete_all=true`, and
-side-effect-free `?dry_run=true` previews:
+side-effect-free `?dry_run=true` previews. Responses use the documented
+`data`, `errors`, and `meta` fields; dry runs do not add simulator-only fields.
 
 - `GET /2/tweets/search/stream/rules`
 - `POST /2/tweets/search/stream/rules`
@@ -130,9 +174,20 @@ Rule limits are configured with positive integers:
 }
 ```
 
-The playground models one shared app/project rule store. It validates structural
-errors and common operators used by local integrations, but it is not a complete
-X query parser and acceptance here does not guarantee acceptance by X.
+The playground models one shared app/project rule store. Endpoint parameters,
+public field names/types, page termination, and mutation selection are aligned
+with the official rule-management documentation and covered by local HTTP
+contract tests. Partial GET behavior for well-formed IDs that do not exist, the
+precise provider error wording for every mixed mutation failure, and cursor
+lifetime across provider-side changes still require sanitized real-provider
+evidence.
+
+Expression validation rejects unbalanced/empty grouping, incomplete Boolean
+expressions, blank operator operands, and configured length violations for the
+Atalaya subset (`from:`, reply/quote/retweet `is:` filters, `lang:`, media
+filters, negation, grouping, OR, and quoted expressions). It is intentionally
+not a complete X query parser: acceptance by Playground does not guarantee
+acceptance by X.
 
 ### Management Endpoints
 

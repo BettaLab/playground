@@ -3,8 +3,10 @@ package playground
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -35,6 +37,17 @@ func responseSummary(t *testing.T, response map[string]interface{}) map[string]i
 	return response["meta"].(map[string]interface{})["summary"].(map[string]interface{})
 }
 
+func listRules(t *testing.T, state *State, target string) (map[string]interface{}, int) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	data, status := handleSearchStreamRuleList(req, state)
+	var response map[string]interface{}
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatalf("decode list response: %v (%s)", err, data)
+	}
+	return response, status
+}
+
 func TestFilteredStreamRuleConfigDefaultsAndValidation(t *testing.T) {
 	defaults := (*PlaygroundConfig)(nil).GetFilteredStreamRulesConfig()
 	if defaults.Capacity != 1000 || defaults.MaxExpressionLength != 1024 {
@@ -45,6 +58,63 @@ func TestFilteredStreamRuleConfigDefaultsAndValidation(t *testing.T) {
 	}
 	if err := validateConfig(&PlaygroundConfig{FilteredStreamRules: &FilteredStreamRulesConfig{Capacity: 10, MaxExpressionLength: 0}}); err == nil {
 		t.Fatal("zero expression length was accepted")
+	}
+}
+
+func ruleRoutingHandler(state *State) http.Handler {
+	query := func(name, valueType string) Parameter {
+		return Parameter{Name: name, In: "query", Schema: map[string]interface{}{"type": valueType}}
+	}
+	spec := &OpenAPISpec{Paths: map[string]PathItem{
+		"/2/tweets/search/stream/rules": {
+			Get: &Operation{OperationID: "getRules", Parameters: []Parameter{
+				query("ids", "string"), query("max_results", "integer"), query("pagination_token", "string"),
+			}, Responses: map[string]Response{}},
+			Post: &Operation{OperationID: "updateRules", Parameters: []Parameter{
+				query("dry_run", "boolean"), query("delete_all", "boolean"),
+			}, Responses: map[string]Response{}},
+		},
+		"/2/tweets/search/stream/rules/counts": {
+			Get: &Operation{OperationID: "getRuleCounts", Responses: map[string]Response{}},
+		},
+	}}
+	return createUnifiedOpenAPIHandler(spec, state, NewExampleStore(), nil)
+}
+
+func TestSearchStreamRuleHTTPRoutingContractFields(t *testing.T) {
+	state := ruleTestState(10, 1024)
+	state.config.Auth = &AuthConfig{DisableValidation: true}
+	handler := ruleRoutingHandler(state)
+
+	post := httptest.NewRecorder()
+	handler.ServeHTTP(post, httptest.NewRequest(http.MethodPost, "/2/tweets/search/stream/rules?dry_run=true", strings.NewReader(`{"add":[{"value":"from:preview"}]}`)))
+	if post.Code != http.StatusOK {
+		t.Fatalf("POST route status=%d body=%s", post.Code, post.Body.String())
+	}
+	var mutation map[string]interface{}
+	if err := json.Unmarshal(post.Body.Bytes(), &mutation); err != nil {
+		t.Fatal(err)
+	}
+	meta := mutation["meta"].(map[string]interface{})
+	if _, exists := meta["dry_run"]; exists {
+		t.Fatalf("POST exposed custom meta.dry_run: %v", mutation)
+	}
+	if len(meta) != 2 || mutation["data"] == nil {
+		t.Fatalf("unexpected documented mutation field set: %v", mutation)
+	}
+
+	state.AddSearchStreamRules([]SearchStreamRuleAddition{{Value: "from:one"}, {Value: "from:two"}}, false)
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/2/tweets/search/stream/rules?ids=100&max_results=1", nil))
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET route status=%d body=%s", get.Code, get.Body.String())
+	}
+	var listing map[string]interface{}
+	if err := json.Unmarshal(get.Body.Bytes(), &listing); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(listedRuleIDs(t, listing), ",") != "100" || len(listing) != 2 {
+		t.Fatalf("GET route ignored filter or exposed custom fields: %v", listing)
 	}
 }
 
@@ -89,14 +159,143 @@ func TestSearchStreamRuleLifecycleAndDeterministicReads(t *testing.T) {
 	}
 }
 
+func listedRuleIDs(t *testing.T, response map[string]interface{}) []string {
+	t.Helper()
+	items := response["data"].([]interface{})
+	ids := make([]string, 0, len(items))
+	for _, raw := range items {
+		ids = append(ids, raw.(map[string]interface{})["id"].(string))
+	}
+	return ids
+}
+
+func TestSearchStreamRuleListingFiltersAndPaginatesWithoutDuplicates(t *testing.T) {
+	state := ruleTestState(10, 1024)
+	for _, value := range []string{"from:one", "from:two", "from:three", "from:four", "from:five"} {
+		state.AddSearchStreamRules([]SearchStreamRuleAddition{{Value: value}}, false)
+	}
+
+	seen := map[string]bool{}
+	target := "/2/tweets/search/stream/rules?max_results=2"
+	for {
+		response, status := listRules(t, state, target)
+		if status != http.StatusOK {
+			t.Fatalf("page status=%d response=%v", status, response)
+		}
+		for _, id := range listedRuleIDs(t, response) {
+			if seen[id] {
+				t.Fatalf("rule %s appeared on multiple pages", id)
+			}
+			seen[id] = true
+		}
+		meta := response["meta"].(map[string]interface{})
+		next, exists := meta["next_token"]
+		if !exists {
+			break
+		}
+		token := next.(string)
+		if len(token) != 16 {
+			t.Fatalf("cursor does not have documented surface: %q", token)
+		}
+		target = "/2/tweets/search/stream/rules?max_results=2&pagination_token=" + token
+	}
+	if len(seen) != 5 {
+		t.Fatalf("pagination omitted rules: %v", seen)
+	}
+
+	response, status := listRules(t, state, "/2/tweets/search/stream/rules?ids=104,100,999&max_results=1")
+	if status != http.StatusOK || strings.Join(listedRuleIDs(t, response), ",") != "100" {
+		t.Fatalf("filtered first page failed: status=%d response=%v", status, response)
+	}
+	if len(response["errors"].([]interface{})) != 1 {
+		t.Fatalf("missing filtered ID was not reported: %v", response)
+	}
+	token := response["meta"].(map[string]interface{})["next_token"].(string)
+	response, status = listRules(t, state, "/2/tweets/search/stream/rules?ids=104,100,999&max_results=1&pagination_token="+token)
+	if status != http.StatusOK || strings.Join(listedRuleIDs(t, response), ",") != "104" {
+		t.Fatalf("filtered final page failed: status=%d response=%v", status, response)
+	}
+	if _, exists := response["meta"].(map[string]interface{})["next_token"]; exists {
+		t.Fatalf("final page exposed next_token: %v", response)
+	}
+}
+
+func TestSearchStreamRuleListingValidatesParametersAndStaleCursors(t *testing.T) {
+	state := ruleTestState(10, 1024)
+	state.AddSearchStreamRules([]SearchStreamRuleAddition{{Value: "from:one"}, {Value: "from:two"}}, false)
+
+	invalidTargets := []string{
+		"/2/tweets/search/stream/rules?ids=",
+		"/2/tweets/search/stream/rules?ids=abc",
+		"/2/tweets/search/stream/rules?ids=12345678901234567890",
+		"/2/tweets/search/stream/rules?max_results=0",
+		"/2/tweets/search/stream/rules?max_results=1001",
+		"/2/tweets/search/stream/rules?max_results=not-a-number",
+		"/2/tweets/search/stream/rules?pagination_token=bad",
+		"/2/tweets/search/stream/rules?pagination_token=",
+		"/2/tweets/search/stream/rules?pagination_token=0000000000000000&pagination_token=1111111111111111",
+	}
+	tooManyIDs := make([]string, 1001)
+	for index := range tooManyIDs {
+		tooManyIDs[index] = strconv.Itoa(index + 1)
+	}
+	invalidTargets = append(invalidTargets,
+		"/2/tweets/search/stream/rules?ids=1&ids=2",
+		"/2/tweets/search/stream/rules?ids="+strings.Join(tooManyIDs, ","),
+	)
+	for _, target := range invalidTargets {
+		response, status := listRules(t, state, target)
+		if status != http.StatusBadRequest || response["type"] != "https://api.x.com/2/problems/invalid-request" {
+			t.Fatalf("target %q status=%d response=%v", target, status, response)
+		}
+	}
+
+	first, _ := listRules(t, state, "/2/tweets/search/stream/rules?max_results=1")
+	token := first["meta"].(map[string]interface{})["next_token"].(string)
+	state.AddSearchStreamRules([]SearchStreamRuleAddition{{Value: "from:three"}}, false)
+	response, status := listRules(t, state, "/2/tweets/search/stream/rules?max_results=1&pagination_token="+token)
+	if status != http.StatusBadRequest || response["detail"] != "is invalid or expired" {
+		t.Fatalf("stale cursor accepted: status=%d response=%v", status, response)
+	}
+}
+
+func TestSearchStreamRuleEmptyListingAndDefaultLimit(t *testing.T) {
+	empty := ruleTestState(1001, 1024)
+	response, status := listRules(t, empty, "/2/tweets/search/stream/rules")
+	if status != http.StatusOK || len(listedRuleIDs(t, response)) != 0 {
+		t.Fatalf("empty listing failed: status=%d response=%v", status, response)
+	}
+	meta := response["meta"].(map[string]interface{})
+	if meta["result_count"] != float64(0) || len(meta) != 1 {
+		t.Fatalf("unexpected empty metadata: %v", meta)
+	}
+
+	state := ruleTestState(1001, 1024)
+	for index := 0; index < 1001; index++ {
+		state.AddSearchStreamRules([]SearchStreamRuleAddition{{Value: fmt.Sprintf("from:user%d", index)}}, false)
+	}
+	response, status = listRules(t, state, "/2/tweets/search/stream/rules")
+	if status != http.StatusOK || len(listedRuleIDs(t, response)) != 1000 {
+		t.Fatalf("default page size failed: status=%d count=%d", status, len(listedRuleIDs(t, response)))
+	}
+	if _, exists := response["meta"].(map[string]interface{})["next_token"]; !exists {
+		t.Fatal("default first page omitted next_token")
+	}
+}
+
 func TestSearchStreamRuleDryRunDoesNotMutateOrConsumeIDs(t *testing.T) {
 	state := ruleTestState(2, 1024)
 	response, status := mutateRules(t, state, "/2/tweets/search/stream/rules?dry_run=true", `{"add":[{"value":"from:example","tag":"preview"}]}`)
 	if status != http.StatusOK || len(state.GetSearchStreamRules()) != 0 || state.nextID != 100 {
 		t.Fatalf("add dry run mutated state: status=%d nextID=%d response=%v", status, state.nextID, response)
 	}
-	if response["meta"].(map[string]interface{})["dry_run"] != true {
-		t.Fatalf("dry run not identified: %v", response)
+	if _, exists := response["meta"].(map[string]interface{})["dry_run"]; exists {
+		t.Fatalf("dry run leaked a simulator-only response field: %v", response)
+	}
+	response, status = mutateRules(t, state, "/2/tweets/search/stream/rules?dry_run=true", `{"add":[{"value":"from:example","tag":"preview"}]}`)
+	count, _, _ := state.SearchStreamRuleLimits()
+	if status != http.StatusOK || count != 0 || state.nextID != 100 || responseSummary(t, response)["created"] != float64(1) {
+		t.Fatalf("repeated dry run was not repeatable: status=%d nextID=%d response=%v", status, state.nextID, response)
 	}
 
 	mutateRules(t, state, "/2/tweets/search/stream/rules", `{"add":[{"value":"from:example"}]}`)
@@ -143,6 +342,28 @@ func TestSearchStreamRuleValidationDuplicatesAndCapacity(t *testing.T) {
 	response, _ = mutateRules(t, unicodeState, "/2/tweets/search/stream/rules", `{"add":[{"value":"ééé"}]}`)
 	if responseSummary(t, response)["created"] != float64(1) {
 		t.Fatalf("limit did not count Unicode characters: %v", response)
+	}
+}
+
+func TestSearchStreamRuleExpressionValidationBoundary(t *testing.T) {
+	for _, value := range []string{
+		"from:jmilei -is:retweet",
+		"from:jmilei (is:reply OR is:quote)",
+		"from:jmilei lang:es has:media",
+		`"quoted native phrase" OR from:jmilei`,
+	} {
+		if message := validateRuleValue(value, 1024); message != "" {
+			t.Fatalf("supported expression %q rejected: %s", value, message)
+		}
+	}
+	for _, value := range []string{"from:", "()", "OR from:jmilei", "from:jmilei OR", "from:jmilei (is:reply OR )", `"unterminated`} {
+		if message := validateRuleValue(value, 1024); message == "" {
+			t.Fatalf("obviously invalid expression %q accepted", value)
+		}
+	}
+	// Unknown native operators remain outside the simulator's validation claim.
+	if message := validateRuleValue("future_operator:value", 1024); message != "" {
+		t.Fatalf("unknown native operator was over-restricted: %s", message)
 	}
 }
 
@@ -208,6 +429,14 @@ func TestSearchStreamRuleCountsUseConfiguredLimit(t *testing.T) {
 	}
 	if response.Data.CapPerClientApp != "7" || response.Data.CapPerProject != "7" || response.Data.ProjectRuleCount != "1" || response.Data.ClientAppRulesCount.RuleCount != 1 {
 		t.Fatalf("unexpected counts response: %+v", response)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	countFields := raw["data"].(map[string]interface{})
+	if len(raw) != 1 || len(countFields) != 4 {
+		t.Fatalf("counts exposed unsupported fields: %v", raw)
 	}
 }
 

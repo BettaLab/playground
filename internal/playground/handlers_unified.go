@@ -5650,42 +5650,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 
 	// GET /2/tweets/search/stream/rules
 	if method == "GET" && path == "/2/tweets/search/stream/rules" {
-		if state == nil {
-			errorResp := map[string]interface{}{
-				"errors": []map[string]interface{}{
-					{
-						"message": "Internal server error",
-						"code":    131,
-						"title":   "Server Error",
-						"type":    "https://api.twitter.com/2/problems/server-error",
-					},
-				},
-				"title":  "Server Error",
-				"detail": "Internal server error",
-				"type":   "https://api.twitter.com/2/problems/server-error",
-			}
-			data, _ := MarshalJSONResponse(errorResp)
-			return data, http.StatusInternalServerError
-		}
-		rules := state.GetSearchStreamRules()
-		rulesData := make([]map[string]interface{}, len(rules))
-		for i, rule := range rules {
-			rulesData[i] = map[string]interface{}{
-				"id":    rule.ID,
-				"value": rule.Value,
-			}
-			if rule.Tag != "" {
-				rulesData[i]["tag"] = rule.Tag
-			}
-		}
-		response := map[string]interface{}{
-			"data": rulesData,
-			"meta": map[string]interface{}{
-				"result_count": len(rulesData),
-			},
-		}
-		data, statusCode := MarshalJSONResponse(response)
-		return data, statusCode
+		return handleSearchStreamRuleList(r, state)
 	}
 
 	// POST /2/tweets/search/stream/rules

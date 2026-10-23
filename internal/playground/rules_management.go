@@ -1,11 +1,16 @@
 package playground
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/base32"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,13 +33,191 @@ type streamRuleDeleteRequest struct {
 	Values *[]string `json:"values,omitempty"`
 }
 
-var numericRuleID = regexp.MustCompile(`^[0-9]+$`)
+var numericRuleID = regexp.MustCompile(`^[0-9]{1,19}$`)
+var rulePaginationToken = regexp.MustCompile(`^[0-9A-V]{16}$`)
+
+const (
+	defaultRulePageSize = 1000
+	maxRulePageSize     = 1000
+)
+
+func handleSearchStreamRuleList(r *http.Request, state *State) ([]byte, int) {
+	if state == nil {
+		return marshalRuleResponse(map[string]interface{}{
+			"title": "Server Error", "detail": "Internal server error",
+			"type": "https://api.x.com/2/problems/server-error",
+		}, http.StatusInternalServerError)
+	}
+
+	ids, normalizedIDs, err := parseRuleIDsFilter(r)
+	if err != nil {
+		return ruleRequestError("ids", err.Error())
+	}
+	maxResults, err := parseRuleMaxResults(r)
+	if err != nil {
+		return ruleRequestError("max_results", err.Error())
+	}
+
+	allRules := state.GetSearchStreamRules()
+	eligible := allRules
+	missingIDs := []string(nil)
+	if ids != nil {
+		requested := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			requested[id] = true
+		}
+		eligible = make([]*SearchStreamRule, 0, len(ids))
+		for _, rule := range allRules {
+			if requested[rule.ID] {
+				eligible = append(eligible, rule)
+				delete(requested, rule.ID)
+			}
+		}
+		for _, id := range ids {
+			if requested[id] {
+				missingIDs = append(missingIDs, id)
+			}
+		}
+	}
+
+	signature := ruleListSignature(eligible, normalizedIDs, maxResults)
+	offset := 0
+	if tokens, present := r.URL.Query()["pagination_token"]; present {
+		if len(tokens) != 1 || tokens[0] == "" {
+			return ruleRequestError("pagination_token", "must be one nonblank 16-character base32hex cursor")
+		}
+		offset, err = decodeRulePaginationToken(tokens[0], signature, len(eligible))
+		if err != nil {
+			return ruleRequestError("pagination_token", err.Error())
+		}
+	}
+	end := offset + maxResults
+	if end > len(eligible) {
+		end = len(eligible)
+	}
+	page := eligible[offset:end]
+
+	dataItems := make([]map[string]interface{}, 0, len(page))
+	for _, rule := range page {
+		item := map[string]interface{}{"id": rule.ID, "value": rule.Value}
+		if rule.Tag != "" {
+			item["tag"] = rule.Tag
+		}
+		dataItems = append(dataItems, item)
+	}
+	meta := map[string]interface{}{"result_count": len(dataItems)}
+	if end < len(eligible) {
+		meta["next_token"] = encodeRulePaginationToken(end, signature)
+	}
+	response := map[string]interface{}{"data": dataItems, "meta": meta}
+	if len(missingIDs) > 0 {
+		errors := make([]map[string]interface{}, 0, len(missingIDs))
+		for _, id := range missingIDs {
+			errors = append(errors, map[string]interface{}{
+				"value":         id,
+				"title":         "Not Found Error",
+				"detail":        "Could not find rule with the requested ID.",
+				"type":          "https://api.x.com/2/problems/resource-not-found",
+				"parameter":     "ids",
+				"resource_id":   id,
+				"resource_type": "rule",
+				"status":        http.StatusNotFound,
+			})
+		}
+		response["errors"] = errors
+	}
+	return marshalRuleResponse(response, http.StatusOK)
+}
+
+func parseRuleIDsFilter(r *http.Request) ([]string, string, error) {
+	values, present := r.URL.Query()["ids"]
+	if !present {
+		return nil, "", nil
+	}
+	if len(values) != 1 || values[0] == "" {
+		return nil, "", fmt.Errorf("must be one comma-separated list of numeric rule IDs")
+	}
+	parts := strings.Split(values[0], ",")
+	if len(parts) > 1000 {
+		return nil, "", fmt.Errorf("must contain at most 1000 IDs")
+	}
+	seen := make(map[string]bool, len(parts))
+	ids := make([]string, 0, len(parts))
+	for _, id := range parts {
+		if !numericRuleID.MatchString(id) {
+			return nil, "", fmt.Errorf("must contain only numeric rule IDs")
+		}
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	normalized := append([]string(nil), ids...)
+	sort.Strings(normalized)
+	return ids, strings.Join(normalized, ","), nil
+}
+
+func parseRuleMaxResults(r *http.Request) (int, error) {
+	values, present := r.URL.Query()["max_results"]
+	if !present {
+		return defaultRulePageSize, nil
+	}
+	if len(values) != 1 {
+		return 0, fmt.Errorf("must be provided once")
+	}
+	value, err := strconv.Atoi(values[0])
+	if err != nil || value < 1 || value > maxRulePageSize {
+		return 0, fmt.Errorf("must be an integer between 1 and 1000")
+	}
+	return value, nil
+}
+
+func ruleListSignature(rules []*SearchStreamRule, normalizedIDs string, maxResults int) [5]byte {
+	hash := sha256.New()
+	for _, rule := range rules {
+		hash.Write([]byte(rule.ID))
+		hash.Write([]byte{0})
+	}
+	hash.Write([]byte(normalizedIDs))
+	hash.Write([]byte{0})
+	hash.Write([]byte(strconv.Itoa(maxResults)))
+	sum := hash.Sum(nil)
+	var signature [5]byte
+	copy(signature[:], sum[:5])
+	return signature
+}
+
+func encodeRulePaginationToken(offset int, signature [5]byte) string {
+	payload := make([]byte, 10)
+	payload[0] = 1
+	binary.BigEndian.PutUint32(payload[1:5], uint32(offset))
+	copy(payload[5:], signature[:])
+	return base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(payload)
+}
+
+func decodeRulePaginationToken(token string, signature [5]byte, eligibleCount int) (int, error) {
+	if !rulePaginationToken.MatchString(token) {
+		return 0, fmt.Errorf("must be a 16-character base32hex cursor")
+	}
+	payload, err := base32.HexEncoding.WithPadding(base32.NoPadding).DecodeString(token)
+	if err != nil || len(payload) != 10 || payload[0] != 1 {
+		return 0, fmt.Errorf("is invalid or expired")
+	}
+	if !bytes.Equal(payload[5:], signature[:]) {
+		return 0, fmt.Errorf("is invalid or expired")
+	}
+	offset := int(binary.BigEndian.Uint32(payload[1:5]))
+	if offset <= 0 || offset >= eligibleCount {
+		return 0, fmt.Errorf("is invalid or expired")
+	}
+	return offset, nil
+}
 
 func handleSearchStreamRuleMutation(r *http.Request, state *State) ([]byte, int) {
 	if state == nil {
 		return marshalRuleResponse(map[string]interface{}{
 			"title": "Server Error", "detail": "Internal server error",
-			"type": "https://api.twitter.com/2/problems/server-error",
+			"type": "https://api.x.com/2/problems/server-error",
 		}, http.StatusInternalServerError)
 	}
 
@@ -214,6 +397,14 @@ func validateRuleValue(value string, maxLength int) string {
 	if depth != 0 {
 		return "Rule value has unbalanced parentheses"
 	}
+	trimmed := strings.TrimSpace(value)
+	upper := strings.ToUpper(trimmed)
+	if regexp.MustCompile(`\(\s*\)`).MatchString(trimmed) {
+		return "Rule value contains an empty Boolean group"
+	}
+	if upper == "OR" || upper == "AND" || strings.HasPrefix(upper, "OR ") || strings.HasPrefix(upper, "AND ") || strings.HasSuffix(upper, " OR") || strings.HasSuffix(upper, " AND") || strings.Contains(upper, " OR OR ") || strings.Contains(upper, " AND AND ") || regexp.MustCompile(`(?i)(\(\s*(OR|AND)\b|\b(OR|AND)\s*\))`).MatchString(trimmed) {
+		return "Rule value contains an incomplete Boolean expression"
+	}
 	for _, token := range strings.Fields(value) {
 		clean := strings.Trim(token, "()")
 		clean = strings.TrimPrefix(clean, "-")
@@ -271,16 +462,13 @@ func buildDeleteRuleResponse(result SearchStreamRuleMutationResult, dryRun bool)
 	return marshalRuleResponse(response, http.StatusOK)
 }
 
-func mutationEnvelope(dryRun bool, successName string, success int, failureName string, failure int) map[string]interface{} {
+func mutationEnvelope(_ bool, successName string, success int, failureName string, failure int) map[string]interface{} {
 	summary := map[string]interface{}{successName: success, failureName: failure}
 	response := map[string]interface{}{
 		"meta": map[string]interface{}{
 			"sent":    time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 			"summary": summary,
 		},
-	}
-	if dryRun {
-		response["meta"].(map[string]interface{})["dry_run"] = true
 	}
 	return response
 }
@@ -294,7 +482,7 @@ func appendRuleErrors(response map[string]interface{}, itemErrors []SearchStream
 		item := map[string]interface{}{
 			"title":  itemError.Kind,
 			"detail": itemError.Message,
-			"type":   "https://api.twitter.com/2/problems/invalid-rules",
+			"type":   "https://api.x.com/2/problems/invalid-rules",
 		}
 		if itemError.ID != "" {
 			item["id"] = itemError.ID
@@ -311,7 +499,7 @@ func ruleRequestError(parameter, message string) ([]byte, int) {
 	return marshalRuleResponse(map[string]interface{}{
 		"title":  "Invalid Request",
 		"detail": message,
-		"type":   "https://api.twitter.com/2/problems/invalid-request",
+		"type":   "https://api.x.com/2/problems/invalid-request",
 		"errors": []map[string]interface{}{{"parameter": parameter, "message": message}},
 	}, http.StatusBadRequest)
 }
