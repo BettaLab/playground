@@ -77,6 +77,10 @@
     "enabled": true,
     "auto_save": true,
     "save_interval": 60
+  },
+  "filtered_stream_rules": {
+    "capacity": 1000,
+    "max_expression_length": 1024
   }
 }
 

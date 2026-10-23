@@ -34,6 +34,27 @@ type SearchStreamRule struct {
 	Tag   string `json:"tag,omitempty"`
 }
 
+// SearchStreamRuleAddition is a validated proposed rule addition.
+type SearchStreamRuleAddition struct {
+	Value string
+	Tag   string
+}
+
+// SearchStreamRuleItemError describes an item that could not be mutated.
+type SearchStreamRuleItemError struct {
+	ID      string
+	Value   string
+	Message string
+	Kind    string
+}
+
+// SearchStreamRuleMutationResult reports an atomic rule-store operation.
+type SearchStreamRuleMutationResult struct {
+	Created []*SearchStreamRule
+	Deleted []*SearchStreamRule
+	Errors  []SearchStreamRuleItemError
+}
+
 // SearchWebhook represents a search webhook.
 type SearchWebhook struct {
 	ID        string    `json:"id"`
@@ -1269,16 +1290,120 @@ func (s *State) GetAllTweets() []*Tweet {
 	return tweets
 }
 
-// GetSearchStreamRules returns all search stream rules
+// GetSearchStreamRules returns deterministic snapshots of all search stream rules.
 func (s *State) GetSearchStreamRules() []*SearchStreamRule {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	rules := make([]*SearchStreamRule, 0, len(s.searchStreamRules))
 	for _, rule := range s.searchStreamRules {
-		rules = append(rules, rule)
+		copy := *rule
+		rules = append(rules, &copy)
 	}
+	sort.Slice(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
 	return rules
+}
+
+// SearchStreamRuleLimits returns the current count and configured single-store limits.
+func (s *State) SearchStreamRuleLimits() (count, capacity, maxExpressionLength int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	limits := s.config.GetFilteredStreamRulesConfig()
+	return len(s.searchStreamRules), limits.Capacity, limits.MaxExpressionLength
+}
+
+// MutateSearchStreamRules applies or previews additions under one state lock.
+func (s *State) AddSearchStreamRules(additions []SearchStreamRuleAddition, dryRun bool) SearchStreamRuleMutationResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := SearchStreamRuleMutationResult{}
+	limits := s.config.GetFilteredStreamRulesConfig()
+	byValue := make(map[string]*SearchStreamRule, len(s.searchStreamRules)+len(additions))
+	for _, rule := range s.searchStreamRules {
+		byValue[rule.Value] = rule
+	}
+	projectedCount := len(s.searchStreamRules)
+	for _, addition := range additions {
+		if existing := byValue[addition.Value]; existing != nil {
+			result.Errors = append(result.Errors, SearchStreamRuleItemError{
+				ID: existing.ID, Value: addition.Value, Message: "Rule value already exists", Kind: "duplicate",
+			})
+			continue
+		}
+		if projectedCount >= limits.Capacity {
+			result.Errors = append(result.Errors, SearchStreamRuleItemError{
+				Value: addition.Value, Message: "Rule capacity reached", Kind: "capacity",
+			})
+			continue
+		}
+		projectedCount++
+		rule := &SearchStreamRule{Value: addition.Value, Tag: addition.Tag}
+		if !dryRun {
+			rule.ID = s.generateIDUnlocked()
+			s.searchStreamRules[rule.ID] = rule
+		}
+		copy := *rule
+		result.Created = append(result.Created, &copy)
+		byValue[addition.Value] = rule
+	}
+	return result
+}
+
+// DeleteSearchStreamRules applies or previews targeted deletion under one state lock.
+func (s *State) DeleteSearchStreamRules(ids, values []string, dryRun bool) SearchStreamRuleMutationResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := SearchStreamRuleMutationResult{}
+	targets := make(map[string]*SearchStreamRule)
+	for _, id := range ids {
+		rule := s.searchStreamRules[id]
+		if rule == nil {
+			result.Errors = append(result.Errors, SearchStreamRuleItemError{ID: id, Message: "Rule ID was not found", Kind: "not_found"})
+			continue
+		}
+		targets[id] = rule
+	}
+	for _, value := range values {
+		var found *SearchStreamRule
+		for _, rule := range s.searchStreamRules {
+			if rule.Value == value {
+				found = rule
+				break
+			}
+		}
+		if found == nil {
+			result.Errors = append(result.Errors, SearchStreamRuleItemError{Value: value, Message: "Rule value was not found", Kind: "not_found"})
+			continue
+		}
+		targets[found.ID] = found
+	}
+	for id, rule := range targets {
+		copy := *rule
+		result.Deleted = append(result.Deleted, &copy)
+		if !dryRun {
+			delete(s.searchStreamRules, id)
+		}
+	}
+	sort.Slice(result.Deleted, func(i, j int) bool { return result.Deleted[i].ID < result.Deleted[j].ID })
+	return result
+}
+
+// DeleteAllSearchStreamRules applies or previews deletion of the single rule store.
+func (s *State) DeleteAllSearchStreamRules(dryRun bool) SearchStreamRuleMutationResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := SearchStreamRuleMutationResult{Deleted: make([]*SearchStreamRule, 0, len(s.searchStreamRules))}
+	for id, rule := range s.searchStreamRules {
+		copy := *rule
+		result.Deleted = append(result.Deleted, &copy)
+		if !dryRun {
+			delete(s.searchStreamRules, id)
+		}
+	}
+	sort.Slice(result.Deleted, func(i, j int) bool { return result.Deleted[i].ID < result.Deleted[j].ID })
+	return result
 }
 
 // FindSearchStreamRuleByValue finds an existing rule by its value (for duplicate detection)

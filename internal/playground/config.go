@@ -29,6 +29,7 @@ type PlaygroundConfig struct {
 	Errors    *ErrorConfig     `json:"errors,omitempty"`
 	Auth      *AuthConfig      `json:"auth,omitempty"`
 	Persistence *PersistenceConfig `json:"persistence,omitempty"`
+	FilteredStreamRules *FilteredStreamRulesConfig `json:"filtered_stream_rules,omitempty"`
 	Seeding   *SeedingConfig   `json:"seeding,omitempty"`
 }
 
@@ -84,6 +85,17 @@ type TopicConfig struct {
 type StreamingConfig struct {
 	DefaultDelayMs int `json:"default_delay_ms,omitempty"` // Default delay between streamed tweets (milliseconds)
 }
+
+// FilteredStreamRulesConfig controls the simulator's single app/project rule store.
+type FilteredStreamRulesConfig struct {
+	Capacity            int `json:"capacity,omitempty"`
+	MaxExpressionLength int `json:"max_expression_length,omitempty"`
+}
+
+const (
+	DefaultFilteredStreamRuleCapacity  = 1000
+	DefaultFilteredStreamRuleMaxLength = 1024
+)
 
 // RateLimitConfig contains configuration for rate limiting simulation
 type RateLimitConfig struct {
@@ -193,6 +205,9 @@ func LoadPlaygroundConfig() (*PlaygroundConfig, error) {
 			return nil, fmt.Errorf("failed to parse playground config: %w", err)
 		}
 
+		if err := validateConfig(&config); err != nil {
+			return nil, fmt.Errorf("invalid playground config: %w", err)
+		}
 		log.Printf("Loaded playground configuration from %s", configPath)
 		return &config, nil
 	}
@@ -237,6 +252,14 @@ func validateConfig(config *PlaygroundConfig) error {
 			return fmt.Errorf("persistence.save_interval must be >= 0")
 		}
 	}
+	if config.FilteredStreamRules != nil {
+		if config.FilteredStreamRules.Capacity <= 0 {
+			return fmt.Errorf("filtered_stream_rules.capacity must be > 0")
+		}
+		if config.FilteredStreamRules.MaxExpressionLength <= 0 {
+			return fmt.Errorf("filtered_stream_rules.max_expression_length must be > 0")
+		}
+	}
 	return nil
 }
 
@@ -252,11 +275,25 @@ func LoadDefaultPlaygroundConfig() (*PlaygroundConfig, error) {
 		return nil, fmt.Errorf("failed to parse embedded default config: %w", err)
 	}
 
+	if err := validateConfig(&config); err != nil {
+		return nil, fmt.Errorf("invalid embedded playground config: %w", err)
+	}
 	log.Printf("Using default playground configuration (embedded)")
 	return &config, nil
 }
 
 // GetSeedingConfig returns the seeding configuration with defaults applied
+// GetFilteredStreamRulesConfig returns rule limits with backward-compatible defaults.
+func (c *PlaygroundConfig) GetFilteredStreamRulesConfig() FilteredStreamRulesConfig {
+	if c != nil && c.FilteredStreamRules != nil {
+		return *c.FilteredStreamRules
+	}
+	return FilteredStreamRulesConfig{
+		Capacity:            DefaultFilteredStreamRuleCapacity,
+		MaxExpressionLength: DefaultFilteredStreamRuleMaxLength,
+	}
+}
+
 func (c *PlaygroundConfig) GetSeedingConfig() *SeedingConfig {
 	if c.Seeding != nil {
 		return c.Seeding

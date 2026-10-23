@@ -5690,88 +5690,7 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 
 	// POST /2/tweets/search/stream/rules
 	if method == "POST" && path == "/2/tweets/search/stream/rules" {
-		var req struct {
-			Add []struct {
-				Value string `json:"value"`
-				Tag   string `json:"tag,omitempty"`
-			} `json:"add"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			// Handle JSON decode errors properly
-			errorResp := CreateValidationErrorResponse("requestBody", "", fmt.Sprintf("invalid JSON: %v", err))
-			data, statusCode := MarshalJSONResponse(errorResp)
-			return data, statusCode
-		}
-
-		// Validate that add array is not empty
-		if len(req.Add) == 0 {
-			errorResp := CreateValidationErrorResponse("add", "", "The `add` field is required and cannot be empty")
-			data, statusCode := MarshalJSONResponse(errorResp)
-			return data, statusCode
-		}
-
-		createdRules := make([]map[string]interface{}, 0)
-		duplicateErrors := make([]map[string]interface{}, 0)
-		createdCount := 0
-		notCreatedCount := 0
-		validCount := 0
-		invalidCount := 0
-
-		for _, rule := range req.Add {
-			// Check for duplicate rule (by value)
-			existingRule := state.FindSearchStreamRuleByValue(rule.Value)
-			if existingRule != nil {
-				// Duplicate rule - add to errors
-				duplicateErrors = append(duplicateErrors, map[string]interface{}{
-					"value": rule.Value,
-					"id":    existingRule.ID,
-					"title": "DuplicateRule",
-					"type":  "https://api.twitter.com/2/problems/duplicate-rules",
-				})
-				notCreatedCount++
-				invalidCount++
-			} else {
-				// Create new rule
-				ruleID := state.CreateSearchStreamRule(rule.Value, rule.Tag)
-				createdRules = append(createdRules, map[string]interface{}{
-					"id":    ruleID,
-					"value": rule.Value,
-					"tag":   rule.Tag,
-				})
-				createdCount++
-				validCount++
-			}
-		}
-
-		// Build response matching real API format
-		// Format timestamp to match real API: "2025-12-19T21:17:21.512Z" (RFC3339 with milliseconds)
-		now := time.Now().UTC()
-		timestamp := now.Format("2006-01-02T15:04:05.000Z")
-
-		response := map[string]interface{}{
-			"meta": map[string]interface{}{
-				"sent": timestamp,
-				"summary": map[string]interface{}{
-					"created":     createdCount,
-					"not_created": notCreatedCount,
-					"valid":       validCount,
-					"invalid":     invalidCount,
-				},
-			},
-		}
-
-		// Add data array if any rules were created
-		if len(createdRules) > 0 {
-			response["data"] = createdRules
-		}
-
-		// Add errors array if any duplicates were found
-		if len(duplicateErrors) > 0 {
-			response["errors"] = duplicateErrors
-		}
-
-		data, statusCode := MarshalJSONResponse(response)
-		return data, statusCode
+		return handleSearchStreamRuleMutation(r, state)
 	}
 
 	// GET /2/tweets/search/stream/rules/counts
@@ -5794,20 +5713,18 @@ func handleStatefulOperation(op *EndpointOperation, path, method string, r *http
 			return data, http.StatusInternalServerError
 		}
 
-		rules := state.GetSearchStreamRules()
-		ruleCount := len(rules)
+		ruleCount, ruleCapacity, _ := state.SearchStreamRuleLimits()
 
-		// Build response matching real API format exactly (no example/mock data)
-		// The real API only returns these specific fields, not all_project_client_apps or errors
+		// Playground models one shared application/project rule store.
 		response := map[string]interface{}{
 			"data": map[string]interface{}{
-				"cap_per_client_app": "2500000",
-				"cap_per_project":    "2500000",
+				"cap_per_client_app": fmt.Sprintf("%d", ruleCapacity),
+				"cap_per_project":    fmt.Sprintf("%d", ruleCapacity),
 				"client_app_rules_count": map[string]interface{}{
-					"client_app_id": "123456",  // Placeholder client app ID
-					"rule_count":    ruleCount, // Actual count from state
+					"client_app_id": "123456",
+					"rule_count":    ruleCount,
 				},
-				"project_rules_count": fmt.Sprintf("%d", ruleCount), // Actual count from state as string
+				"project_rules_count": fmt.Sprintf("%d", ruleCount),
 			},
 		}
 

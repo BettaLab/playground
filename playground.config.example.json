@@ -8,6 +8,10 @@
       "Perfect for domain-specific or language-specific testing"
     ]
   },
+  "filtered_stream_rules": {
+    "capacity": 1000,
+    "max_expression_length": 1024
+  },
   "users": {
     "profiles": [
       {

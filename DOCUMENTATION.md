@@ -441,11 +441,32 @@ The configuration file is JSON format:
   "rate_limit": { ... },
   "errors": { ... },
   "auth": { ... },
-  "persistence": { ... }
+  "persistence": { ... },
+  "filtered_stream_rules": { ... }
 }
 ```
 
 ### Configuration Options
+
+#### Filtered Stream Rule Configuration
+
+```json
+{
+  "filtered_stream_rules": {
+    "capacity": 1000,
+    "max_expression_length": 1024
+  }
+}
+```
+
+Both values must be positive integers. The simulator maintains one shared rule
+store for the client app/project and exposes that capacity through the X-style
+rule-count endpoint. Rule updates support add, delete by ID or value,
+`delete_all=true`, and mutation-free `dry_run=true` previews. Query validation
+covers structural defects and common `from:`, `is:`, `lang:`, and `has:` forms;
+it is deliberately not a complete implementation of X's query language.
+
+---
 
 #### Tweet Configuration
 

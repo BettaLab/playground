@@ -111,6 +111,29 @@ Configuration files are stored in `~/.playground/`:
 - `examples/` - Custom example responses (optional)
 - `.playground-openapi-cache.json` - Cached OpenAPI spec
 
+### Filtered Stream rule simulation
+
+The X-compatible rule endpoints support deterministic GET, batched add,
+targeted delete by provider ID or exact value, `?delete_all=true`, and
+side-effect-free `?dry_run=true` previews:
+
+- `GET /2/tweets/search/stream/rules`
+- `POST /2/tweets/search/stream/rules`
+- `GET /2/tweets/search/stream/rules/counts`
+
+Rule limits are configured with positive integers:
+
+```json
+"filtered_stream_rules": {
+  "capacity": 1000,
+  "max_expression_length": 1024
+}
+```
+
+The playground models one shared app/project rule store. It validates structural
+errors and common operators used by local integrations, but it is not a complete
+X query parser and acceptance here does not guarantee acceptance by X.
+
 ### Management Endpoints
 
 The playground provides several management endpoints (not part of X API):
