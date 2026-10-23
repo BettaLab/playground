@@ -22,7 +22,7 @@ is an X API compatibility boundary, not a custom Playground API.
   consistent with X API semantics.
 - Before changing an X-compatible endpoint, consult the **current official X
   documentation** and, where available, sanitized real-provider observations.
-  Add contract-focused tests for requests, success/error responses, dry runs,
+  Add contract-focused tests for requests, success/error responses, dry runs,Known
   limits, and stream events relevant to the change. A passing simulator test
   alone does not prove compatibility with X.
 - If X behavior cannot be reproduced or verified, document the discrepancy,
@@ -35,13 +35,6 @@ Official reference endpoints for the current rule-management work:
 - [Update stream rules](https://docs.x.com/x-api/stream/update-stream-rules)
 - [Get rule counts](https://docs.x.com/x-api/stream/get-stream-rule-counts)
 
-**Known gaps requiring contract verification (Filtered Stream rules):** The
-current `GET /2/tweets/search/stream/rules` implementation does not honor
-`ids`, `max_results`, or `pagination_token`; `POST .../rules?dry_run=true`
-currently adds `meta.dry_run` to its response even though that field is not
-part of the documented response shape. Expression validation is intentionally
-partial. Do not make Atalaya rely on these differences. Resolve compatibility
-gaps against official documentation/provider evidence before claiming parity.
 
 ## Features
 
